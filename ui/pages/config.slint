@@ -1,0 +1,350 @@
+// 配置页面：卡片、CRUD 表单、运行配置查看和批量更新。
+
+import { Theme } from "../theme.slint";
+import { Card, CardPadding, CardRadius } from "../components/card.slint";
+import { Button, ButtonSize, ButtonVariant } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
+import { DropdownMenu } from "../components/dropdown-menu.slint";
+import { Input } from "../components/input.slint";
+import { ScrollView } from "../components/list-view.slint";
+import { ResponsiveGrid } from "../components/responsive-grid.slint";
+import { Select, SelectItem } from "../components/select.slint";
+import { Toaster, ToastVariant } from "../components/toast.slint";
+import { IconDisplay, IconSet } from "@lucide";
+
+export struct ConfigRow {
+    name: string,
+    enabled: bool,
+    source-type: string,
+    source-uri: string,
+    path: string,
+}
+
+export global ConfigModel {
+    in-out property <[ConfigRow]> configs: [];
+    in-out property <bool> loading: false;
+    in-out property <bool> busy: false;
+    in-out property <string> error: "";
+
+    in-out property <bool> form-open: false;
+    in-out property <string> form-editing-path: "";
+    in-out property <string> form-name: "";
+    in-out property <int> form-type-index: 1;
+    in-out property <string> form-source: "";
+
+    in-out property <bool> runtime-open: false;
+    in-out property <string> runtime-config: "";
+    in-out property <bool> toast-visible: false;
+    in-out property <string> toast-message: "";
+    in-out property <int> toast-variant: 0;
+
+    callback toggle-enabled(string);
+    callback edit(string);
+    callback update(string);
+    callback delete(string);
+    callback open-add();
+    callback choose-file();
+    callback submit-form(string, string, string, string);
+    callback cancel-form();
+    callback view-runtime();
+    callback update-all();
+}
+
+component ConfigCard inherits Card {
+    in property <ConfigRow> data;
+    property <length> menu-width: 160px;
+    property <length> badge-height: 18px;
+    property <length> badge-padding: Theme.spacing-xs;
+
+    card-radius: CardRadius.lg;
+    background: Theme.surface-1;
+    border-color: Theme.hairline;
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { ConfigModel.toggle-enabled(root.data.path); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.spacing-xxs;
+            alignment: center;
+
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.spacing-xs;
+                config-name-label := Text {
+                    text: root.data.name;
+                    color: Theme.ink;
+                    font-size: Theme.typography-body-sm;
+                    font-weight: Theme.typography-weight-medium;
+                    overflow: elide;
+
+                    if self.preferred-width > self.width: Tooltip {
+                        text: @markdown("\{root.data.name}");
+                    }
+                }
+
+                Rectangle {
+                    width: type-label.preferred-width + 2 * root.badge-padding;
+                    height: root.badge-height;
+                    border-width: Theme.border-width;
+                    border-color: Theme.hairline;
+                    border-radius: root.badge-height / 2;
+                    type-label := Text {
+                        height: parent.height;
+                        text: root.data.source-type;
+                        color: Theme.ink-subtle;
+                        font-size: Theme.typography-caption;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Text {
+                text: root.data.enabled ? "已启用" : "已禁用";
+                color: root.data.enabled ? Theme.semantic-success : Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            DropdownMenu {
+                content-width: root.menu-width;
+                items: [{ label: "编辑信息" }, { label: "更新" }, { label: "删除" }];
+                selected(index) => {
+                    if (index == 0) { ConfigModel.edit(root.data.path); }
+                    if (index == 1) { ConfigModel.update(root.data.path); }
+                    if (index == 2) { ConfigModel.delete(root.data.path); }
+                }
+                Button {
+                    size: ButtonSize.xs;
+                    is-icon: true;
+                    variant: ButtonVariant.ghost;
+                    haspopup: true;
+                    IconDisplay {
+                        icon: IconSet.Ellipsis;
+                        size: Theme.typography-body-sm;
+                        stroke: Theme.ink;
+                    }
+
+                    clicked => { parent.open-dropdown(); }
+                }
+            }
+        }
+    }
+}
+
+export component ConfigPage inherits Rectangle {
+    property <length> loading-height: 32px;
+    property <length> action-offset: Theme.spacing-md;
+
+    property <[SelectItem]> type-items: [
+        { value: "http", label: "HTTP" },
+        { value: "file", label: "文件" },
+    ];
+
+    Flickable {
+        VerticalLayout {
+            padding: Theme.spacing-md;
+            grid := ResponsiveGrid {
+                item-count: ConfigModel.configs.length;
+                item-min-width: 240px;
+                item-height: 68px;
+
+                for row[index] in ConfigModel.configs: ConfigCard {
+                    x: grid.item-x(index);
+                    y: grid.item-y(index);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    data: row;
+                }
+            }
+        }
+    }
+
+    if !ConfigModel.loading && ConfigModel.configs.length == 0: Text {
+        text: "暂无配置";
+        color: Theme.ink-subtle;
+        font-size: Theme.typography-body-sm;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    action-bar := VerticalLayout {
+        x: root.width - self.width - root.action-offset;
+        y: root.height - self.height - root.action-offset;
+        width: Theme.button-lg;
+        height: 3 * Theme.button-lg + 2 * Theme.spacing-xs;
+        spacing: Theme.spacing-xs;
+        Button {
+            size: ButtonSize.lg;
+            is-icon: true;
+            rounded: true;
+            tips: "查看运行时配置";
+            clicked => { ConfigModel.view-runtime(); }
+            IconDisplay {
+                icon: IconSet.FileText;
+                size: Theme.typography-body-lg;
+                stroke: Theme.on-primary;
+            }
+        }
+
+        Button {
+            size: ButtonSize.lg;
+            is-icon: true;
+            rounded: true;
+            tips: "更新所有配置";
+            disabled: ConfigModel.busy;
+            clicked => { ConfigModel.update-all(); }
+            IconDisplay {
+                icon: IconSet.RefreshCw;
+                size: Theme.typography-body-lg;
+                stroke: Theme.on-primary;
+            }
+        }
+
+        Button {
+            size: ButtonSize.lg;
+            is-icon: true;
+            rounded: true;
+            tips: "新建配置";
+            clicked => { ConfigModel.open-add(); }
+            IconDisplay {
+                icon: IconSet.Plus;
+                size: Theme.typography-body-lg;
+                stroke: Theme.on-primary;
+            }
+        }
+    }
+
+    Dialog {
+        width: root.width;
+        height: root.height;
+        open <=> ConfigModel.form-open;
+        title: ConfigModel.form-editing-path == "" ? "添加配置" : "编辑配置";
+        close-label: "关闭";
+        dismissed => { ConfigModel.cancel-form(); }
+
+        VerticalLayout {
+            spacing: Theme.spacing-xs;
+            Text {
+                text: "配置名称";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+
+            Input {
+                width: parent.width;
+                text <=> ConfigModel.form-name;
+                placeholder: "留空自动取文件名";
+            }
+
+            Text {
+                text: "类型";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+
+            Select {
+                width: parent.width;
+                items: root.type-items;
+                selected-index <=> ConfigModel.form-type-index;
+            }
+
+            if ConfigModel.form-type-index == 0: Text {
+                text: "下载地址";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+            if ConfigModel.form-type-index == 0: Input {
+                width: parent.width;
+                text <=> ConfigModel.form-source;
+                placeholder: "https://...";
+            }
+            if ConfigModel.form-type-index == 1: Text {
+                text: "配置文件";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+            if ConfigModel.form-type-index == 1: HorizontalLayout {
+                spacing: Theme.spacing-xs;
+                Input {
+                    horizontal-stretch: 1;
+                    text <=> ConfigModel.form-source;
+                    read-only: true;
+                    placeholder: "请选择本地 YAML 文件";
+                }
+
+                Button {
+                    text: "选择";
+                    variant: ButtonVariant.secondary;
+                    clicked => { ConfigModel.choose-file(); }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing-xs;
+                Button {
+                    text: "取消";
+                    variant: ButtonVariant.ghost;
+                    clicked => { ConfigModel.cancel-form(); }
+                }
+
+                Button {
+                    text: "保存";
+                    variant: ButtonVariant.default;
+                    disabled: ConfigModel.busy;
+                    clicked => {
+                        ConfigModel.submit-form(
+                            ConfigModel.form-editing-path,
+                            ConfigModel.form-name,
+                            ConfigModel.form-type-index == 0 ? "http" : "file",
+                            ConfigModel.form-source);
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        open <=> ConfigModel.runtime-open;
+        title: "运行配置";
+        description: "data/runtime/config.yaml 的实际内容";
+        close-label: "关闭";
+        dismissed => { ConfigModel.runtime-open = false; }
+
+        ScrollView {
+            height: 360px;
+            viewport-height: runtime-text.preferred-height;
+            runtime-text := TextInput {
+                text: ConfigModel.runtime-config;
+                color: Theme.ink;
+                font-size: Theme.typography-caption;
+                read-only: true;
+                single-line: false;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    Toaster {
+        width: root.width;
+        height: root.height;
+        shown <=> ConfigModel.toast-visible;
+        text: ConfigModel.toast-message;
+        variant: ConfigModel.toast-variant == 1 ? ToastVariant.success
+            : (ConfigModel.toast-variant == 2 ? ToastVariant.error : ToastVariant.default);
+    }
+}

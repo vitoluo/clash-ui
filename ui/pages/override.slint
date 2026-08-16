@@ -1,0 +1,477 @@
+// 覆写页面：响应式卡片、CRUD 表单与批量操作。
+
+import { Theme } from "../theme.slint";
+import { Card, CardPadding, CardRadius } from "../components/card.slint";
+import { Button, ButtonSize, ButtonVariant } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
+import { DropdownMenu } from "../components/dropdown-menu.slint";
+import { Input } from "../components/input.slint";
+import { ResponsiveGrid } from "../components/responsive-grid.slint";
+import { Select, SelectItem } from "../components/select.slint";
+import { Toaster, ToastVariant } from "../components/toast.slint";
+import { IconDisplay, IconSet } from "@lucide";
+
+export struct OverrideRow {
+    name: string,
+    enabled: bool,
+    source-type: string,
+    source-uri: string,
+    sort: int,
+    path: string,
+}
+
+export global OverrideModel {
+    in-out property <[OverrideRow]> overrides: [];
+    in-out property <bool> loading: false;
+    in-out property <bool> busy: false;
+    in-out property <string> error: "";
+
+    in-out property <bool> form-open: false;
+    in-out property <string> form-editing-path: "";
+    in-out property <string> form-name: "";
+    in-out property <int> form-type-index: 1;
+    in-out property <string> form-source: "";
+
+    in-out property <bool> toast-visible: false;
+    in-out property <string> toast-message: "";
+    in-out property <int> toast-variant: 0;
+
+    callback toggle-enabled(string);
+    callback reorder(string, int);
+    callback edit(string);
+    callback update(string);
+    callback delete(string);
+    callback open-add();
+    callback choose-file();
+    callback submit-form(string, string, string, string);
+    callback cancel-form();
+    callback update-all();
+}
+
+component OverrideCard inherits Card {
+    in property <OverrideRow> data;
+    in property <int> source-index: -1;
+    in property <bool> is-dragging: false;
+    property <length> menu-width: 160px;
+    property <length> badge-height: 18px;
+    property <length> badge-padding: Theme.spacing-xs;
+    callback drag-started(length, length);
+    callback drag-moved(length, length);
+    callback drag-released();
+    callback drag-cancelled();
+    property <bool> dragged: false;
+
+    card-radius: CardRadius.lg;
+    background: Theme.surface-1;
+    border-color: Theme.hairline;
+    opacity: root.is-dragging ? 0.62 : 1.0;
+
+    drag-touch := TouchArea {
+        mouse-cursor: root.is-dragging ? grabbing : pointer;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.left) {
+                root.dragged = false;
+                root.drag-started(self.mouse-x, self.mouse-y);
+            }
+            if (event.kind == PointerEventKind.move) {
+                root.dragged = true;
+                root.drag-moved(root.x + self.mouse-x, root.y + self.mouse-y);
+            }
+            if (event.kind == PointerEventKind.up) {
+                root.drag-released();
+            }
+            if (event.kind == PointerEventKind.cancel) {
+                root.drag-cancelled();
+            }
+        }
+        clicked => {
+            if (!root.dragged && !OverrideModel.busy) {
+                OverrideModel.toggle-enabled(root.data.path);
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        VerticalLayout {
+            alignment: center;
+            drag-icon := IconDisplay {
+                icon: IconSet.GripVertical;
+                size: Theme.typography-body-lg;
+                stroke: drag-touch.has-hover ? Theme.ink : Theme.ink-muted;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.spacing-xxs;
+            alignment: center;
+
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.spacing-xs;
+                override-name-label := Text {
+                    text: root.data.name;
+                    color: Theme.ink;
+                    font-size: Theme.typography-body-sm;
+                    font-weight: Theme.typography-weight-medium;
+                    overflow: elide;
+
+                    if self.preferred-width > self.width: Tooltip {
+                        text: @markdown("\{root.data.name}");
+                    }
+                }
+
+                Rectangle {
+                    width: type-label.preferred-width + 2 * root.badge-padding;
+                    height: root.badge-height;
+                    border-width: Theme.border-width;
+                    border-color: Theme.hairline;
+                    border-radius: root.badge-height / 2;
+                    type-label := Text {
+                        height: parent.height;
+                        text: root.data.source-type;
+                        color: Theme.ink-subtle;
+                        font-size: Theme.typography-caption;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Text {
+                text: root.data.enabled ? "已启用" : "已禁用";
+                color: root.data.enabled ? Theme.semantic-success : Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            DropdownMenu {
+                content-width: root.menu-width;
+                items: [{ label: "编辑信息" }, { label: "更新" }, { label: "删除" }];
+                selected(index) => {
+                    if (index == 0) { OverrideModel.edit(root.data.path); }
+                    if (index == 1) { OverrideModel.update(root.data.path); }
+                    if (index == 2) { OverrideModel.delete(root.data.path); }
+                }
+                Button {
+                    size: ButtonSize.xs;
+                    is-icon: true;
+                    variant: ButtonVariant.ghost;
+                    haspopup: true;
+                    IconDisplay {
+                        icon: IconSet.Ellipsis;
+                        size: Theme.typography-body-sm;
+                        stroke: Theme.ink;
+                    }
+
+                    clicked => { parent.open-dropdown(); }
+                }
+            }
+        }
+    }
+}
+
+export component OverridePage inherits Rectangle {
+    property <length> loading-height: 32px;
+    property <length> action-offset: Theme.spacing-md;
+    property <int> drag-source-index: -1;
+    property <int> drag-target-index: -1;
+    property <length> drag-card-x: 0px;
+    property <length> drag-card-y: 0px;
+    property <length> drag-grab-x: 0px;
+    property <length> drag-grab-y: 0px;
+    property <bool> dragging: false;
+    property <bool> model-busy: OverrideModel.busy;
+    property <bool> model-loading: OverrideModel.loading;
+
+    property <[SelectItem]> type-items: [
+        { value: "http", label: "HTTP" },
+        { value: "file", label: "文件" },
+    ];
+
+    function clear-drag() {
+        root.drag-source-index = -1;
+        root.drag-target-index = -1;
+        root.drag-card-x = 0px;
+        root.drag-card-y = 0px;
+        root.drag-grab-x = 0px;
+        root.drag-grab-y = 0px;
+        root.dragging = false;
+    }
+
+    function preview-index(index: int) -> int {
+        if (!root.dragging || root.drag-source-index < 0 || root.drag-target-index < 0
+            || root.drag-source-index == root.drag-target-index) {
+            return index;
+        }
+        if (index == root.drag-source-index) {
+            return root.drag-target-index;
+        }
+        if (root.drag-source-index < root.drag-target-index
+            && index > root.drag-source-index && index <= root.drag-target-index) {
+            return index - 1;
+        }
+        if (root.drag-source-index > root.drag-target-index
+            && index >= root.drag-target-index && index < root.drag-source-index) {
+            return index + 1;
+        }
+        return index;
+    }
+
+    function target-index(x: length, y: length) -> int {
+        let column = Math.floor(x / (grid.item-width + grid.gap));
+        let row = Math.floor(y / (grid.item-height + grid.gap));
+        let clamped-column = Math.max(0, Math.min(grid.column-count - 1, column));
+        let clamped-row = Math.max(0, row);
+        return Math.max(
+            0,
+            Math.min(
+                OverrideModel.overrides.length - 1,
+                clamped-row * grid.column-count + clamped-column));
+    }
+
+    Flickable {
+        interactive: !root.dragging;
+
+        VerticalLayout {
+            padding: Theme.spacing-md;
+            grid := ResponsiveGrid {
+                item-count: OverrideModel.overrides.length;
+                item-min-width: 240px;
+                item-height: 68px;
+
+                for row[index] in OverrideModel.overrides: OverrideCard {
+                    x: root.dragging && root.drag-source-index == index
+                        ? root.drag-card-x : grid.item-x(root.preview-index(index));
+                    y: root.dragging && root.drag-source-index == index
+                        ? root.drag-card-y : grid.item-y(root.preview-index(index));
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    visible: !(root.dragging && root.drag-source-index == index);
+                    data: row;
+                    source-index: index;
+                    is-dragging: root.dragging && root.drag-source-index == index;
+                    drag-started(grab-x, grab-y) => {
+                        if (!OverrideModel.busy && !OverrideModel.loading) {
+                            root.drag-source-index = index;
+                            root.drag-target-index = index;
+                            root.drag-grab-x = grab-x;
+                            root.drag-grab-y = grab-y;
+                            root.drag-card-x = grid.item-x(index);
+                            root.drag-card-y = grid.item-y(index);
+                            root.dragging = true;
+                        }
+                    }
+                    drag-moved(x, y) => {
+                        if (root.dragging && root.drag-source-index == index) {
+                            root.drag-card-x = x - root.drag-grab-x;
+                            root.drag-card-y = y - root.drag-grab-y;
+                            root.drag-target-index = root.target-index(x, y);
+                        }
+                    }
+                    drag-released => {
+                        if (root.dragging && root.drag-source-index == index
+                            && root.drag-target-index != root.drag-source-index
+                            && root.drag-source-index >= 0
+                            && root.drag-source-index < OverrideModel.overrides.length) {
+                            let path = OverrideModel.overrides[root.drag-source-index].path;
+                            let target = root.drag-target-index;
+                            root.clear-drag();
+                            OverrideModel.reorder(path, target);
+                        } else {
+                            root.clear-drag();
+                        }
+                    }
+                    drag-cancelled => { root.clear-drag(); }
+                }
+
+                if root.dragging && root.drag-source-index >= 0: OverrideCard {
+                    x: root.drag-card-x;
+                    y: root.drag-card-y;
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    z: 1;
+                    data: OverrideModel.overrides[root.drag-source-index];
+                    source-index: root.drag-source-index;
+                    is-dragging: true;
+                    drag-moved(x, y) => {
+                        root.drag-card-x = x - root.drag-grab-x;
+                        root.drag-card-y = y - root.drag-grab-y;
+                        root.drag-target-index = root.target-index(x, y);
+                    }
+                    drag-released => {
+                        if (root.drag-target-index != root.drag-source-index) {
+                            let path = OverrideModel.overrides[root.drag-source-index].path;
+                            let target = root.drag-target-index;
+                            root.clear-drag();
+                            OverrideModel.reorder(path, target);
+                        } else {
+                            root.clear-drag();
+                        }
+                    }
+                    drag-cancelled => { root.clear-drag(); }
+                }
+            }
+        }
+    }
+
+    changed model-busy => {
+        if (root.model-busy) { root.clear-drag(); }
+    }
+    changed model-loading => {
+        if (root.model-loading) { root.clear-drag(); }
+    }
+
+    if !OverrideModel.loading && OverrideModel.overrides.length == 0: Text {
+        text: "暂无覆写";
+        color: Theme.ink-subtle;
+        font-size: Theme.typography-body-sm;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    action-bar := VerticalLayout {
+        x: root.width - self.width - root.action-offset;
+        y: root.height - self.height - root.action-offset;
+        width: Theme.button-lg;
+        height: 2 * Theme.button-lg + Theme.spacing-xs;
+        spacing: Theme.spacing-xs;
+        Button {
+            size: ButtonSize.lg;
+            is-icon: true;
+            rounded: true;
+            tips: "更新所有覆写";
+            disabled: OverrideModel.busy;
+            clicked => { OverrideModel.update-all(); }
+            IconDisplay {
+                icon: IconSet.RefreshCw;
+                size: Theme.typography-body-lg;
+                stroke: Theme.on-primary;
+            }
+        }
+
+        Button {
+            size: ButtonSize.lg;
+            is-icon: true;
+            rounded: true;
+            tips: "新建覆写";
+            disabled: OverrideModel.busy;
+            clicked => { OverrideModel.open-add(); }
+            IconDisplay {
+                icon: IconSet.Plus;
+                size: Theme.typography-body-lg;
+                stroke: Theme.on-primary;
+            }
+        }
+    }
+
+    Dialog {
+        width: root.width;
+        height: root.height;
+        open <=> OverrideModel.form-open;
+        title: OverrideModel.form-editing-path == "" ? "添加覆写" : "编辑覆写";
+        close-label: "关闭";
+        dismissed => { OverrideModel.cancel-form(); }
+
+        VerticalLayout {
+            spacing: Theme.spacing-xs;
+            Text {
+                text: "覆写名称";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+
+            Input {
+                width: parent.width;
+                text <=> OverrideModel.form-name;
+                placeholder: "留空自动取文件名";
+            }
+
+            Text {
+                text: "类型";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+
+            Select {
+                width: parent.width;
+                items: root.type-items;
+                selected-index <=> OverrideModel.form-type-index;
+            }
+
+            if OverrideModel.form-type-index == 0: Text {
+                text: "下载地址";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+            if OverrideModel.form-type-index == 0: Input {
+                width: parent.width;
+                text <=> OverrideModel.form-source;
+                placeholder: "https://...";
+            }
+            if OverrideModel.form-type-index == 1: Text {
+                text: "覆写文件";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+            }
+            if OverrideModel.form-type-index == 1: HorizontalLayout {
+                spacing: Theme.spacing-xs;
+                Input {
+                    horizontal-stretch: 1;
+                    text <=> OverrideModel.form-source;
+                    read-only: true;
+                    placeholder: "请选择本地 YAML 文件";
+                }
+
+                Button {
+                    text: "选择";
+                    variant: ButtonVariant.secondary;
+                    disabled: OverrideModel.busy;
+                    clicked => { OverrideModel.choose-file(); }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing-xs;
+                Button {
+                    text: "取消";
+                    variant: ButtonVariant.ghost;
+                    clicked => { OverrideModel.cancel-form(); }
+                }
+
+                Button {
+                    text: "保存";
+                    variant: ButtonVariant.default;
+                    disabled: OverrideModel.busy;
+                    clicked => {
+                        OverrideModel.submit-form(
+                            OverrideModel.form-editing-path,
+                            OverrideModel.form-name,
+                            OverrideModel.form-type-index == 0 ? "http" : "file",
+                            OverrideModel.form-source);
+                    }
+                }
+            }
+        }
+    }
+
+    Toaster {
+        width: root.width;
+        height: root.height;
+        shown <=> OverrideModel.toast-visible;
+        text: OverrideModel.toast-message;
+        variant: OverrideModel.toast-variant == 1 ? ToastVariant.success
+            : (OverrideModel.toast-variant == 2 ? ToastVariant.error : ToastVariant.default);
+    }
+}

@@ -1,0 +1,88 @@
+// 八方向边缘缩放手柄（透明覆盖于窗口边缘）。
+//
+// 三平台统一使用无框窗口与自绘边框，手柄位于自绘边框内侧的 4~6px 客户区。
+// 按下即发起交互式缩放（Rust 侧走 winit drag_resize_window）。
+//
+// 方向编码：0=N 1=S 2=W 3=E 4=NE 5=SE 6=NW 7=SW
+
+import { Theme } from "../theme.slint";
+
+export component ResizeHandles inherits Rectangle {
+    callback start-resize(int);
+    property <length> edge-size: 4px;
+    property <length> corner-size: 6px;
+    width: 100%;
+    height: 100%;
+
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: root.edge-size;
+        mouse-cursor: ns-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(0); } }
+    }
+
+    TouchArea {
+        x: 0;
+        y: root.height - root.edge-size;
+        width: 100%;
+        height: root.edge-size;
+        mouse-cursor: ns-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(1); } }
+    }
+
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: root.edge-size;
+        height: 100%;
+        mouse-cursor: ew-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(2); } }
+    }
+
+    TouchArea {
+        x: root.width - root.edge-size;
+        y: 0;
+        width: root.edge-size;
+        height: 100%;
+        mouse-cursor: ew-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(3); } }
+    }
+
+    TouchArea {
+        x: root.width - root.corner-size;
+        y: 0;
+        width: root.corner-size;
+        height: root.corner-size;
+        mouse-cursor: nesw-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(4); } }
+    }
+
+    TouchArea {
+        x: root.width - root.corner-size;
+        y: root.height - root.corner-size;
+        width: root.corner-size;
+        height: root.corner-size;
+        mouse-cursor: nwse-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(5); } }
+    }
+
+    TouchArea {
+        x: 0;
+        y: root.height - root.corner-size;
+        width: root.corner-size;
+        height: root.corner-size;
+        mouse-cursor: nesw-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(7); } }
+    }
+
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: root.corner-size;
+        height: root.corner-size;
+        mouse-cursor: nwse-resize;
+        pointer-event(ev) => { if ev.kind == PointerEventKind.down { root.start-resize(6); } }
+    }
+}

@@ -1,0 +1,48 @@
+import { Theme } from "../theme.slint";
+import { Table, TableBodyRow, TableRow } from "../components/table.slint";
+import { ListView } from "../components/list-view.slint";
+
+export global RulesModel {
+    in-out property <[TableRow]> rules: [];
+    in-out property <bool> loading: false;
+    in-out property <string> error: "";
+}
+
+export component RulesPage inherits Rectangle {
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        table := Table {
+            columns: ["规则内容", "规则类型", "指向代理"];
+            column-width-ratios: [0.6, 0.25, 0.15];
+
+            ListView {
+                for item[index] in RulesModel.rules: TableBodyRow {
+                    data: item;
+                    column-width-ratios: table.column-width-ratios;
+                    show-divider: index < RulesModel.rules.length - 1;
+                }
+            }
+        }
+    }
+
+    if RulesModel.error != "": rules-error-label := Text {
+        text: RulesModel.error;
+        color: Theme.semantic-danger;
+        font-size: Theme.typography-caption;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+
+        if self.preferred-width > self.width: Tooltip {
+            text: @markdown("\{RulesModel.error}");
+        }
+    }
+    if !RulesModel.loading && RulesModel.error == "" && RulesModel.rules.length == 0: Text {
+        text: "暂无规则";
+        color: Theme.ink-subtle;
+        font-size: Theme.typography-caption;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}

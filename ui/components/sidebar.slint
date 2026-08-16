@@ -1,0 +1,81 @@
+// 左侧导航组件：基于 slintcn Sidebar 重写，使用项目主题和 Lucide 图标。
+import { Theme } from "../theme.slint";
+import { IconDisplay, Icon } from "@lucide";
+
+export struct SidebarItem {
+    label: string,
+    page: int,
+    icon: Icon,
+}
+
+component NavRow inherits Rectangle {
+    in property <SidebarItem> item;
+    in property <int> active-page;
+    callback navigate(int);
+
+    property <length> row-padding: Theme.spacing-sm;
+    property <length> row-spacing: Theme.spacing-sm;
+
+    height: Theme.button-lg;
+    border-radius: Theme.rounded-md;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.navigate(root.item.page); }
+    }
+
+    background: root.active-page == root.item.page
+        ? Theme.primary-subtle
+        : (touch.has-hover ? Theme.hover : transparent);
+
+    animate background {
+        duration: Theme.duration-hover;
+        easing: Theme.easing-hover;
+    }
+
+    HorizontalLayout {
+        spacing: row-spacing;
+        padding-left: row-padding;
+        y: touch.pressed ? 1px : 0px;
+        animate y {
+            duration: Theme.duration-click;
+            easing: Theme.easing-click;
+        }
+        VerticalLayout {
+            alignment: center;
+            IconDisplay {
+                icon: root.item.icon;
+                size: Theme.typography-body-lg;
+                stroke: root.active-page == root.item.page ? Theme.ink
+                    : touch.has-hover ? Theme.ink-muted : Theme.ink-subtle;
+            }
+        }
+
+        Text {
+            text: root.item.label;
+            color: root.active-page == root.item.page ? Theme.ink
+                : touch.has-hover ? Theme.ink-muted : Theme.ink-subtle;
+            font-size: Theme.typography-body-sm;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <[SidebarItem]> items: [];
+    in property <int> active-page: -1;
+    callback navigate(int);
+
+    nav-shell := Rectangle {
+        Flickable {
+            VerticalLayout {
+                spacing: Theme.spacing-xxs;
+                for item[i] in root.items: NavRow {
+                    item: item;
+                    active-page: root.active-page;
+                    navigate(page) => { root.navigate(page); }
+                }
+            }
+        }
+    }
+}

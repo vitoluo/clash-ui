@@ -1,0 +1,140 @@
+// 改造自 slintcn dialog/dialog-panel 源码；颜色与图标按项目 Theme、lucide 规范重写。
+
+import { Theme } from "../theme.slint";
+import { Button, ButtonSize, ButtonVariant } from "button.slint";
+import { IconDisplay, IconSet } from "@lucide";
+
+export component DialogPanel inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <string> close-label: "关闭";
+    in property <bool> trap-focus: true;
+    callback closed();
+
+    // 弹窗几何值属于组件实现；间距、圆角、排版和颜色使用 Theme 标准值。
+    property <length> panel-width: 520px;
+    property <length> close-offset-x: 44px;
+    property <length> close-offset-y: 12px;
+    property <length> close-size: 28px;
+
+    width: panel-width;
+    height: panel-layout.preferred-height;
+    background: Theme.surface-1;
+    border-width: Theme.border-width;
+    border-color: Theme.hairline-strong;
+    border-radius: Theme.rounded-lg;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-offset-y: Theme.shadow-offset-y;
+    drop-shadow-color: Theme.shadow-color;
+
+    TouchArea {
+        clicked => {}
+
+        panel-layout := VerticalLayout {
+            padding: Theme.spacing-lg;
+            spacing: Theme.spacing-md;
+
+            VerticalLayout {
+                spacing: Theme.spacing-xs;
+                if root.title != "": Text {
+                    text: root.title;
+                    color: Theme.ink;
+                    font-size: Theme.typography-card-title;
+                    font-weight: Theme.typography-weight-semibold;
+                }
+                if root.description != "": Text {
+                    text: root.description;
+                    color: Theme.ink-subtle;
+                    font-size: Theme.typography-body-sm;
+                    wrap: word-wrap;
+                }
+            }
+
+            @children
+        }
+    }
+
+    close-button := Button {
+        x: root.width - root.close-offset-x;
+        y: root.close-offset-y;
+        width: root.close-size;
+        height: root.close-size;
+        size: ButtonSize.sm;
+        is-icon: true;
+        variant: ButtonVariant.ghost;
+        clicked => { root.closed(); }
+        IconDisplay {
+            icon: IconSet.X;
+            size: Theme.typography-body-sm;
+            stroke: Theme.ink-subtle;
+        }
+    }
+
+    forward-focus: focus-scope;
+    focus-scope := FocusScope {
+        // 辅助焦点域不覆盖面板，避免截获表单组件的首次点击。
+        width: 0px;
+        height: 0px;
+        enabled: root.trap-focus;
+        key-pressed(event) => {
+            if (event.text == "\u{1b}") {
+                root.closed();
+                return accept;
+            }
+            if (event.text == "\u{9}") {
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    public function take-focus() { focus-scope.focus(); }
+}
+
+export component Dialog inherits Rectangle {
+    in-out property <bool> open: false;
+    in property <string> title;
+    in property <string> description;
+    in property <bool> dismiss-on-backdrop: true;
+    in property <string> close-label: "关闭";
+    callback dismissed();
+
+    background: transparent;
+
+    backdrop := Rectangle {
+        width: root.width;
+        height: root.height;
+        visible: root.open;
+        background: Theme.overlay;
+        if root.open: TouchArea {
+            clicked => {
+                if (root.dismiss-on-backdrop) {
+                    root.open = false;
+                    root.dismissed();
+                }
+            }
+        }
+    }
+
+    panel := DialogPanel {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        visible: root.open;
+        title: root.title;
+        description: root.description;
+        close-label: root.close-label;
+        closed => {
+            root.open = false;
+            root.dismissed();
+        }
+        @children
+    }
+
+    changed open => {
+        if (self.open) {
+            panel.take-focus();
+        }
+    }
+
+    forward-focus: panel;
+}

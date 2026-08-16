@@ -1,0 +1,204 @@
+// 改造自 slintcn select 源码；颜色与图标按项目 Theme、lucide 规范重写。
+
+import { Theme } from "../theme.slint";
+import { IconDisplay, IconSet } from "@lucide";
+import { FocusRing } from "focus-ring.slint";
+
+export struct SelectItem {
+    value: string,
+    label: string,
+}
+
+export component Select inherits Rectangle {
+    in property <[SelectItem]> items;
+    in-out property <int> selected-index: -1;
+    in property <string> placeholder: "请选择";
+    in property <string> show-text;
+    in property <bool> disabled: false;
+    in-out property <int> highlighted-index: -1;
+    callback changed(int);
+    property <bool> pointer-focus: false;
+    property <length> trigger-padding-left: Theme.spacing-sm;
+    property <length> trigger-padding-right: Theme.spacing-xs;
+    property <length> menu-padding: Theme.spacing-xxs;
+    property <length> row-padding: Theme.spacing-xs;
+    property <length> row-height: 30px;
+
+    height: Theme.button-md;
+    background: transparent;
+
+    function open-dropdown() {
+        if (root.selected-index >= 0) {
+            root.highlighted-index = root.selected-index;
+        }
+        popup.show();
+    }
+
+    trigger := Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.surface-2;
+        border-width: Theme.border-width;
+        border-color: trigger-touch.has-hover ? Theme.hairline-strong : Theme.hairline;
+        border-radius: Theme.rounded-md;
+
+        trigger-touch := TouchArea {
+            mouse-cursor: root.disabled ? default : pointer;
+            pointer-event(ev) => {
+                if (!root.disabled
+                    && ev.button == PointerEventButton.left
+                    && ev.kind == PointerEventKind.down) {
+                    root.pointer-focus = true;
+                }
+            }
+            clicked => {
+                if (!root.disabled) {
+                    trigger-focus.focus();
+                    root.open-dropdown();
+                }
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: root.trigger-padding-left;
+            padding-right: root.trigger-padding-right;
+            spacing: Theme.spacing-xs;
+            trigger-label := Text {
+                text: root.show-text != "" ?
+                    root.show-text : root.selected-index >= 0 && root.selected-index < root.items.length ?
+                    root.items[root.selected-index].label :
+                    root.placeholder;
+                color: root.show-text != "" || root.selected-index >= 0 ?
+                    Theme.ink : Theme.ink-subtle;
+                font-size: Theme.typography-body-sm;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+
+                if self.preferred-width > self.width: Tooltip {
+                    text: @markdown("\{root.selected-index >= 0 && root.selected-index < root.items.length
+                        ? root.items[root.selected-index].label : root.placeholder}");
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                IconDisplay {
+                    icon: IconSet.ChevronDown;
+                    size: Theme.typography-body;
+                    stroke: root.selected-index >= 0 ? Theme.ink : Theme.ink-subtle;
+                }
+            }
+        }
+    }
+
+    trigger-focus := FocusScope {
+        width: 0px;
+        height: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            root.pointer-focus = false;
+            if (event.text == "\n" || event.text == " " || event.text == Key.DownArrow) {
+                root.open-dropdown();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    forward-focus: trigger-focus;
+
+    if trigger-focus.has-focus && !root.pointer-focus: FocusRing {
+        host-width: parent.width;
+        host-height: parent.height;
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + Theme.spacing-xxs;
+        width: root.width;
+        height: root.items.length * root.row-height + 2 * root.menu-padding;
+        close-policy: close-on-click-outside;
+
+        panel := Rectangle {
+            background: Theme.surface-1;
+            border-width: Theme.border-width;
+            border-color: Theme.hairline-strong;
+            border-radius: Theme.rounded-md;
+            drop-shadow-blur: Theme.shadow-blur;
+            drop-shadow-offset-y: Theme.shadow-offset-y;
+            drop-shadow-color: Theme.shadow-color;
+            forward-focus: popup-focus;
+
+            VerticalLayout {
+                padding: root.menu-padding;
+                spacing: 0px;
+                for item[index] in root.items: Rectangle {
+                    height: root.row-height;
+                    border-radius: Theme.rounded-sm;
+                    background: index == root.highlighted-index ? Theme.primary-subtle
+                        : row-touch.has-hover ? Theme.hover : transparent;
+
+                    animate background {
+                        duration: Theme.duration-hover;
+                        easing: Theme.easing-hover;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: root.row-padding;
+                        padding-right: root.row-padding;
+                        Text {
+                            text: item.label;
+                            color: index == root.highlighted-index ? Theme.ink
+                                : row-touch.has-hover ? Theme.ink-muted : Theme.ink-subtle;
+                            font-size: Theme.typography-body-sm;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    row-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.selected-index = index;
+                            root.changed(index);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+
+            popup-focus := FocusScope {
+                // 辅助焦点域不覆盖选项，避免截获选项的首次点击。
+                width: 0px;
+                height: 0px;
+                key-pressed(event) => {
+                    if (event.text == "\u{1b}") { popup.close(); return accept; }
+                    if (event.text == "\n") {
+                        if (root.items.length > 0) {
+                            root.selected-index = root.highlighted-index;
+                            root.changed(root.selected-index);
+                        }
+                        popup.close();
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow && root.items.length > 0) {
+                        root.highlighted-index = mod(root.highlighted-index + 1, root.items.length);
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow && root.items.length > 0) {
+                        if (root.highlighted-index < 0) {
+                            root.highlighted-index = root.items.length - 1;
+                        } else {
+                            root.highlighted-index = mod(root.highlighted-index + root.items.length - 1, root.items.length);
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+    }
+
+    opacity: root.disabled ? Theme.disabled-opacity : 1.0;
+}

@@ -1,0 +1,24 @@
+// 通过同名组件覆盖 Slint 官方 ToolTipImpl。
+
+import { Theme } from "../theme.slint";
+
+export component ToolTipImpl inherits Rectangle {
+    in property <styled-text> text;
+
+    background: Theme.surface-2;
+    border-width: Theme.border-width;
+    border-color: Theme.hairline-strong;
+    border-radius: Theme.rounded-md;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-offset-y: Theme.shadow-offset-y;
+    drop-shadow-color: Theme.shadow-color;
+
+    VerticalLayout {
+        padding: Theme.spacing-xs;
+        StyledText {
+            text: root.text;
+            default-color: Theme.ink-muted;
+            default-font-size: Theme.typography-caption;
+        }
+    }
+}

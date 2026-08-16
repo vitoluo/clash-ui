@@ -1,0 +1,21 @@
+// 项目焦点环：仅在键盘聚焦时显示，默认视觉值全部来自项目 Theme。
+
+import { Theme } from "../theme.slint";
+
+export component FocusRing inherits Rectangle {
+    in property <length> host-width;
+    in property <length> host-height;
+    in property <length> offset: Theme.border-width;
+    in property <length> ring-width: Theme.border-width;
+    in property <length> radius: Theme.rounded-md;
+    in property <color> ring-color: Theme.primary-focus;
+
+    x: -root.offset;
+    y: -root.offset;
+    width: root.host-width + 2 * root.offset;
+    height: root.host-height + 2 * root.offset;
+    border-width: root.ring-width;
+    border-color: root.ring-color;
+    border-radius: root.radius + root.ring-width;
+    background: transparent;
+}

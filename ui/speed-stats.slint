@@ -1,0 +1,150 @@
+// 网速统计组件（task 005）：导航区底部实时上传/下载曲线 + 两行自适应单位文本。
+//
+// 状态由 src/speed_stats.rs 经 SpeedModel 全局写入；本组件只读 SpeedModel 与 Theme。
+//
+// 注意：本组件在 task 007 之前临时内嵌于 MainWindow 底部占位区，
+//       待导航区框架（007）完成后迁入导航区底部，并移除此处临时嵌入（见 main.slint 标注）。
+//
+// 曲线采用 Path + viewbox 实现：坐标在 0..CHART_W × 0..CHART_H 内由 Rust 生成，
+// 经 viewbox 缩放铺满容器，因此宽度自适应。CHART_W / CHART_H 须与 src/speed_stats.rs 保持一致。
+
+import { Theme } from "theme.slint";
+
+// 图表逻辑尺寸：CHART_W=176 / CHART_H=56，须与 src/speed_stats.rs 中的常量保持一致。
+
+// 网速统计状态容器（由 Rust 写入）。定义为 export global 以便 Rust 侧生成类型。
+export global SpeedModel {
+    in-out property <string> up-rate: "0 B/s";
+    in-out property <string> down-rate: "0 B/s";
+    in-out property <string> up-total: "0 B";
+    in-out property <string> down-total: "0 B";
+    // 由 Rust 生成的 SVG path 命令串（viewbox 坐标系）
+    in-out property <string> up-area-cmd;
+    in-out property <string> up-line-cmd;
+    in-out property <string> down-area-cmd;
+    in-out property <string> down-line-cmd;
+}
+
+export component SpeedStats inherits Rectangle {
+    property <length> dot-size: 8px;
+    property <length> desc-size: 10px;
+    property <length> line-width: 1.6px;
+    property <float> viewbox-width: 176.0;
+    property <float> viewbox-height: 56.0;
+
+    VerticalLayout {
+        spacing: Theme.spacing-xxs;
+
+        // 实时网速曲线（viewbox 缩放铺满容器，宽度自适应）
+        Rectangle {
+            Path {
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: root.viewbox-width;
+                viewbox-height: root.viewbox-height;
+                commands: SpeedModel.down-area-cmd;
+                fill: Theme.net-down.with-alpha(0.12);
+            }
+
+            Path {
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: root.viewbox-width;
+                viewbox-height: root.viewbox-height;
+                commands: SpeedModel.down-line-cmd;
+                stroke: Theme.net-down;
+                stroke-width: root.line-width;
+            }
+
+            Path {
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: root.viewbox-width;
+                viewbox-height: root.viewbox-height;
+                commands: SpeedModel.up-area-cmd;
+                fill: Theme.net-up.with-alpha(0.12);
+            }
+
+            Path {
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: root.viewbox-width;
+                viewbox-height: root.viewbox-height;
+                commands: SpeedModel.up-line-cmd;
+                stroke: Theme.net-up;
+                stroke-width: root.line-width;
+            }
+        }
+
+        HorizontalLayout {
+            alignment: space-between;
+            HorizontalLayout {
+                spacing: Theme.spacing-xxs;
+                alignment: center;
+                cross-axis-alignment: center;
+                Rectangle {
+                    width: root.dot-size;
+                    height: root.dot-size;
+                    border-radius: root.dot-size / 2;
+                    background: Theme.net-up;
+                }
+
+                Text {
+                    text: "上传";
+                    color: Theme.ink;
+                    font-size: root.desc-size;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.spacing-xxs;
+                alignment: center;
+                cross-axis-alignment: center;
+                Rectangle {
+                    width: root.dot-size;
+                    height: root.dot-size;
+                    border-radius: root.dot-size / 2;
+                    background: Theme.net-down;
+                }
+
+                Text {
+                    text: "下载";
+                    color: Theme.ink;
+                    font-size: root.desc-size;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            Text {
+                text: SpeedModel.up-rate;
+                color: Theme.ink;
+                font-size: Theme.typography-body-sm;
+                horizontal-alignment: left;
+            }
+
+            Text {
+                text: SpeedModel.down-rate;
+                color: Theme.ink;
+                font-size: Theme.typography-body-sm;
+                horizontal-alignment: right;
+            }
+        }
+
+        HorizontalLayout {
+            Text {
+                text: SpeedModel.up-total;
+                color: Theme.ink-subtle;
+                font-size: root.desc-size;
+                horizontal-alignment: left;
+            }
+
+            Text {
+                text: SpeedModel.down-total;
+                color: Theme.ink-subtle;
+                font-size: root.desc-size;
+                horizontal-alignment: right;
+            }
+        }
+    }
+}

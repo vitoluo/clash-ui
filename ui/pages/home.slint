@@ -1,0 +1,279 @@
+import { Theme } from "../theme.slint";
+import { Card, CardPadding, CardRadius } from "../components/card.slint";
+import { IconDisplay, IconSet } from "@lucide";
+import { Switch } from "../components/switch.slint";
+import { Select } from "../components/select.slint";
+import { Button, ButtonSize, ButtonVariant } from "../components/button.slint";
+import { ResponsiveGrid } from "../components/responsive-grid.slint";
+
+export global HomeModel {
+    in-out property <string> platform-name: "—";
+    in-out property <string> outbound-mode: "—";
+    in-out property <string> proxy-address: "—";
+    in-out property <bool> system-proxy: false;
+    in-out property <bool> tun-proxy: false;
+    in-out property <string> core-version: "—";
+    in-out property <bool> core-running: false;
+    in-out property <string> client-mem: "—";
+    in-out property <string> core-mem: "—";
+    in-out property <string> uptime: "0:00:00";
+    in-out property <string> client-version: "—";
+    in-out property <string> zashboard-url: "";
+
+    callback change-mode(int);
+    callback copy-env(int);
+    callback toggle-system-proxy();
+    callback toggle-tun();
+    callback restart-core();
+    callback update-core();
+    callback open-online-panel();
+}
+
+component HomeCard inherits Card {
+    in property <string> label;
+    in property <string> value;
+    in property <string> detail;
+    in property <int> kind: 0;
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <bool> running: false;
+    callback action(int);
+    property <length> link-height: 32px;
+
+    card-radius: CardRadius.lg;
+
+    VerticalLayout {
+        padding: Theme.spacing-sm;
+        spacing: Theme.spacing-xs;
+
+        HorizontalLayout {
+            height: Theme.button-xs;
+            spacing: Theme.spacing-xs;
+            Text {
+                text: root.label;
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+
+            if root.kind == 3 || root.kind == 4: Switch {
+                checked <=> root.checked;
+                disabled: !root.enabled;
+                horizontal-stretch: 0;
+                toggled(_) => { root.action(0); }
+            }
+
+            if root.kind == 5: HorizontalLayout {
+                spacing: Theme.spacing-xxs;
+                Button {
+                    size: ButtonSize.xs;
+                    is-icon: true;
+                    variant: ButtonVariant.ghost;
+                    tips: "重启核心";
+                    clicked => { root.action(0); }
+                    IconDisplay {
+                        icon: IconSet.RotateCw;
+                        size: Theme.typography-body-sm;
+                        stroke: Theme.ink;
+                    }
+                }
+
+                Button {
+                    size: ButtonSize.xs;
+                    is-icon: true;
+                    variant: ButtonVariant.ghost;
+                    tips: "更新核心";
+                    clicked => { root.action(1); }
+                    IconDisplay {
+                        icon: IconSet.Download;
+                        size: Theme.typography-body-sm;
+                        stroke: Theme.ink;
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            if root.kind == 1: Select {
+                items: [
+                    { value: "rule", label: "规则模式" },
+                    { value: "global", label: "全局模式" },
+                    { value: "direct", label: "直连模式" },
+                ];
+                selected-index: root.value == "规则模式" ? 0 :
+                    root.value == "全局模式" ? 1 :
+                    root.value == "直连模式" ? 2 : -1;
+                disabled: !root.enabled;
+                changed(index) => { root.action(index); }
+            }
+
+            if root.kind == 2: proxy-select := Select {
+                items: [
+                    { value: "powershell", label: "PowerShell" },
+                    { value: "cmd", label: "CMD" },
+                    { value: "bash", label: "Bash" },
+                ];
+                show-text: root.value;
+                selected-index: -1;
+                disabled: !root.enabled;
+                changed(index) => {
+                    root.action(index);
+                    proxy-select.selected-index = -1;
+                }
+            }
+
+            if root.kind != 1 && root.kind != 2 && root.kind != 6: Text {
+                text: root.value;
+                color: root.kind == 5
+                    ? (root.running ? Theme.semantic-success : Theme.semantic-danger)
+                    : Theme.ink;
+                font-size: Theme.typography-body;
+                vertical-alignment: center;
+                overflow: elide;
+
+                if self.preferred-width > self.width: Tooltip {
+                    text: @markdown("\{root.value}");
+                }
+            }
+
+            if root.kind == 6: Button {
+                variant: ButtonVariant.link;
+                hpad: 0px;
+                text: root.value;
+                clicked => { root.action(0); }
+            }
+        }
+
+        if root.detail != "": Text {
+            text: root.detail;
+            color: Theme.ink-subtle;
+            font-size: Theme.typography-caption;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component HomePage inherits Rectangle {
+    Flickable {
+        VerticalLayout {
+            padding: Theme.spacing-md;
+            spacing: Theme.spacing-sm;
+            grid := ResponsiveGrid {
+                item-count: 11;
+                item-height: 100px;
+
+                HomeCard {
+                    x: grid.item-x(0);
+                    y: grid.item-y(0);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "系统信息";
+                    value: HomeModel.platform-name;
+                }
+
+                HomeCard {
+                    x: grid.item-x(1);
+                    y: grid.item-y(1);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "出站模式";
+                    value: HomeModel.outbound-mode;
+                    kind: 1;
+                    enabled: HomeModel.core-running;
+                    action(i) => { HomeModel.change-mode(i); }
+                }
+
+                HomeCard {
+                    x: grid.item-x(2);
+                    y: grid.item-y(2);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "代理地址";
+                    value: HomeModel.proxy-address;
+                    kind: 2;
+                    enabled: HomeModel.core-running && HomeModel.proxy-address != "—";
+                    action(i) => { HomeModel.copy-env(i); }
+                }
+
+                HomeCard {
+                    x: grid.item-x(3);
+                    y: grid.item-y(3);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "系统代理";
+                    value: HomeModel.system-proxy ? "已开启" : "已关闭";
+                    kind: 3;
+                    checked <=> HomeModel.system-proxy;
+                    enabled: HomeModel.core-running;
+                    action(_) => { HomeModel.toggle-system-proxy(); }
+                }
+
+                HomeCard {
+                    x: grid.item-x(4);
+                    y: grid.item-y(4);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "TUN 代理";
+                    value: HomeModel.tun-proxy ? "已开启" : "已关闭";
+                    kind: 4;
+                    checked <=> HomeModel.tun-proxy;
+                    enabled: HomeModel.core-running;
+                    action(_) => { HomeModel.toggle-tun(); }
+                }
+
+                HomeCard {
+                    x: grid.item-x(5);
+                    y: grid.item-y(5);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "核心信息";
+                    value: HomeModel.core-running ? "运行中" : "已停止";
+                    detail: HomeModel.core-version;
+                    kind: 5;
+                    running: HomeModel.core-running;
+                    action(i) => { if (i == 0) { HomeModel.restart-core(); } else { HomeModel.update-core(); } }
+                }
+
+                HomeCard {
+                    x: grid.item-x(6);
+                    y: grid.item-y(6);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "内存使用";
+                    value: HomeModel.client-mem + " + " + HomeModel.core-mem;
+                    detail: "客户端 + 核心";
+                }
+
+                HomeCard {
+                    x: grid.item-x(7);
+                    y: grid.item-y(7);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "运行时间";
+                    value: HomeModel.uptime;
+                }
+
+                HomeCard {
+                    x: grid.item-x(8);
+                    y: grid.item-y(8);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "版本号";
+                    value: HomeModel.client-version;
+                }
+
+                HomeCard {
+                    x: grid.item-x(9);
+                    y: grid.item-y(9);
+                    width: grid.item-width;
+                    height: grid.item-height;
+                    label: "在线面板";
+                    value: "打开 Zashboard";
+                    kind: 6;
+                    action(_) => { HomeModel.open-online-panel(); }
+                }
+            }
+        }
+    }
+}

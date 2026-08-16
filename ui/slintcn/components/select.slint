@@ -1,0 +1,255 @@
+// slintcn Select — PopupWindow-backed dropdown.
+//
+// Usage:
+//   Select {
+//       items: [{ value: "free", label: "Free" }, { value: "pro", label: "Pro" }];
+//       selected-index <=> plan-idx;
+//       placeholder: "Choose a plan…";
+//   }
+//
+// Keyboard:
+//   On trigger:  Enter / Space / ↓  open the dropdown
+//   In popup:    ↑ / ↓  move highlight (wrap)
+//                Enter  commit highlight + close
+//                Esc    close (no commit)
+//                click  outside  close (no commit, via close-on-click-outside)
+//
+// Design notes:
+//   - PopupWindow's own visibility is the source of truth for "open".
+//     Slint 1.16 doesn't expose a `closed` callback, but with focus-driven
+//     interaction we don't need to observe close: keyboard handlers live
+//     inside the popup's FocusScope, so they only run while it's shown.
+//   - We can't call `popup-focus.focus()` from the outer scope (Slint
+//     forbids cross-PopupWindow element access). Instead, the popup's
+//     inner Rectangle does `forward-focus: popup-focus`, so showing the
+//     popup gives keyboard focus to the right FocusScope automatically.
+
+import { Tokens } from "../theme/tokens.slint";
+import { Icon } from "icon.slint";
+import { LucidePaths } from "lucide-paths.slint";
+
+export struct SelectItem {
+    value: string,
+    label: string,
+}
+
+export component Select inherits Rectangle {
+    // Options shown in the dropdown.
+    in property <[SelectItem]> items;
+    // Two-way; index of the chosen item, or -1 for no selection.
+    in-out property <int> selected-index: -1;
+    // Shown when nothing is selected.
+    in property <string> placeholder: "Select…";
+    // When true, the trigger dims and stops opening.
+    in property <bool> disabled: false;
+    // Internal — which item is highlighted by arrow keys inside the popup.
+    in-out property <int> highlighted-index: 0;
+    // Fired with the new `selected-index` when the user picks an item.
+    callback changed(int);
+    // True while focus arrived from a pointer press — keeps the ring keyboard-only.
+    property <bool> pointer-focus: false;
+
+    // `inherits Rectangle` + explicit dimensions so parent layouts get a
+    // concrete preferred size — without this, Select collapsed to 0×0 in
+    // sibling columns (bug fixed in v0.8.1). The Rectangle itself is
+    // transparent; `trigger` paints the styled background.
+    background: transparent;
+    min-width:        220px;
+    preferred-width:  220px;
+    min-height:        36px;
+    preferred-height:  36px;
+
+    function open-dropdown() {
+        root.highlighted-index = root.selected-index >= 0
+            ? root.selected-index : 0;
+        popup.show();
+    }
+
+    trigger := Rectangle {
+        x: 0;
+        y: 0;
+        width:  parent.width;
+        height: Tokens.density-control;
+        background: Tokens.color-surface-1;
+        border-color: trigger-touch.has-hover
+            ? Tokens.color-border-hairline-strong
+            : Tokens.color-border-hairline;
+        border-width: 1px;
+        border-radius: Tokens.radius-md;
+
+        HorizontalLayout {
+            padding-left:  12px;
+            padding-right: 10px;
+            spacing: 8px;
+
+            Text {
+                text: root.selected-index >= 0
+                    ? root.items[root.selected-index].label
+                    : root.placeholder;
+                color: root.selected-index >= 0
+                    ? Tokens.color-foreground
+                    : Tokens.color-muted-foreground;
+                font-size: Tokens.typography-body-size;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            Icon {
+                commands: LucidePaths.chevron-down;
+                tint: Tokens.color-muted-foreground;
+                size: 16px;
+            }
+        }
+
+        if trigger-focus.has-focus && !root.pointer-focus: Rectangle {
+            x: -2px;
+            y: -2px;
+            width:  parent.width  + 4px;
+            height: parent.height + 4px;
+            border-width: 2px;
+            border-color: Tokens.color-ring;
+            border-radius: Tokens.radius-md + 2px;
+            background: transparent;
+        }
+
+        animate border-color {
+            duration: Tokens.motion-fast;
+            easing: Tokens.motion-easing-standard;
+        }
+
+        trigger-touch := TouchArea {
+            mouse-cursor: root.disabled ? default : pointer;
+            pointer-event(ev) => {
+                if (!root.disabled
+                        && ev.button == PointerEventButton.left
+                        && ev.kind == PointerEventKind.down) {
+                    root.pointer-focus = true;
+                }
+            }
+            clicked => {
+                if (!root.disabled) { root.open-dropdown(); }
+            }
+        }
+    }
+
+    trigger-focus := FocusScope {
+        // Zero-size so the scope cannot intercept the first pointer press
+        // (default FocusScope fills its parent and swallows that click).
+        width: 0px;
+        height: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            root.pointer-focus = false;
+            if (event.text == "\n" || event.text == " " || event.text == Key.DownArrow) {
+                root.open-dropdown();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    forward-focus: trigger-focus;
+
+    popup := PopupWindow {
+        x: 0;
+        y: 40px;
+        width: trigger.width;
+        height: root.items.length * 34px + 8px;
+        close-policy: close-on-click-outside;
+
+        panel := Rectangle {
+            background: Tokens.color-card;
+            border-color: Tokens.color-border-hairline-strong;
+            border-width: 1px;
+            border-radius: Tokens.radius-md;
+            drop-shadow-blur:     Tokens.shadow-e3-blur;
+            drop-shadow-offset-y: Tokens.shadow-e3-offset-y;
+            drop-shadow-color:    Tokens.shadow-e3-color;
+
+            // Showing the popup focuses this Rectangle; we forward to the
+            // FocusScope so arrow-key handlers receive events.
+            forward-focus: popup-focus;
+
+            VerticalLayout {
+                padding: 4px;
+                spacing: 0;
+
+                for item[idx] in root.items: Rectangle {
+                    height: 30px;
+                    background:
+                        idx == root.highlighted-index
+                            ? Tokens.color-surface-2 :
+                        row-touch.has-hover
+                            ? Tokens.color-surface-1 :
+                            transparent;
+                    border-radius: Tokens.radius-sm;
+
+                    HorizontalLayout {
+                        padding-left:  8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+
+                        Text {
+                            text: item.label;
+                            color: Tokens.color-foreground;
+                            font-size: Tokens.typography-body-size;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        if idx == root.selected-index: Icon {
+                            commands: LucidePaths.check;
+                            tint: Tokens.color-foreground;
+                            size: 14px;
+                        }
+                    }
+
+                    row-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.selected-index = idx;
+                            root.changed(idx);
+                            popup.close();
+                        }
+                    }
+
+                    animate background {
+                        duration: Tokens.motion-fast;
+                        easing: Tokens.motion-easing-standard;
+                    }
+                }
+            }
+
+            popup-focus := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == "\u{1b}") {
+                        popup.close();
+                        return accept;
+                    }
+                    if (event.text == "\n") {
+                        if (root.items.length > 0) {
+                            root.selected-index = root.highlighted-index;
+                            root.changed(root.selected-index);
+                        }
+                        popup.close();
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        if (root.items.length > 0) {
+                            root.highlighted-index = mod(root.highlighted-index + 1, root.items.length);
+                        }
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        if (root.items.length > 0) {
+                            root.highlighted-index = mod(root.highlighted-index + root.items.length - 1, root.items.length);
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+    }
+
+    opacity: root.disabled ? 0.5 : 1.0;
+}

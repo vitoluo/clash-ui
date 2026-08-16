@@ -1,0 +1,35 @@
+// 通用响应式网格：只负责列数、尺寸、定位和内容高度计算。
+
+import { Theme } from "../theme.slint";
+
+export component ResponsiveGrid inherits Rectangle {
+    in property <int> item-count: 0;
+    in property <length> item-min-width: 200px;
+    in property <length> item-height: 90px;
+    in property <length> gap: Theme.spacing-sm;
+
+    out property <int> column-count: item-count > 0
+        ? Math.floor((self.width + gap) / (item-min-width + gap))
+        : 0;
+    out property <int> row-count: item-count > 0
+        ? Math.ceil(item-count / column-count)
+        : 0;
+    out property <length> item-width: item-count > 0
+        ? (self.width - (column-count - 1) * gap) / column-count
+        : 0;
+    out property <length> content-height: item-count > 0
+        ? row-count * item-height + (row-count - 1) * gap
+        : 0;
+
+    height: content-height;
+
+    public pure function item-x(index: int) -> length {
+        return Math.mod(index, column-count) * (item-width + gap);
+    }
+
+    public pure function item-y(index: int) -> length {
+        return Math.floor(index / column-count) * (item-height + gap);
+    }
+
+    @children
+}

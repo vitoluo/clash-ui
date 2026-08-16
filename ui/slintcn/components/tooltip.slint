@@ -1,0 +1,104 @@
+// slintcn Tooltip — hover-revealed bubble using Slint's PopupWindow.
+//
+// Usage:
+//   Tooltip {
+//       text: "Save and continue";
+//       side: TooltipSide.top;
+//       Button { text: "Save"; }
+//   }
+//
+// PopupWindow lets the bubble render on a layer above the parent window,
+// so the trigger can sit anywhere inside a deeply nested layout without
+// the bubble being clipped by its surrounding component.
+//
+// Implementation notes:
+//   - Slint's PopupWindow is shown/closed imperatively via .show() /
+//     .close(). We watch `trigger-hovered` via `changed` and call show/close.
+//   - The wrapped child sits inside a HorizontalLayout so Tooltip exposes a
+//     real preferred-width / preferred-height to its parent layout. Without
+//     this, Tooltip collapsed to 0×0 in sibling layouts (the trigger would
+//     visually overlap its neighbours — bug fixed in v0.8.1).
+
+import { Tokens } from "../theme/tokens.slint";
+
+export enum TooltipSide { top, right, bottom, left }
+
+export component Tooltip inherits Rectangle {
+    // Label rendered inside the bubble.
+    in property <string> text;
+    // Which edge of the trigger to anchor to — `top` (default), `right`, `bottom`, `left`.
+    in property <TooltipSide> side: TooltipSide.top;
+
+    background: transparent;
+
+    // Size to the wrapped child by routing @children through a single
+    // HorizontalLayout — Tooltip's preferred dimensions then equal the
+    // layout's, which equal the child's.
+    preferred-width:  child-layout.preferred-width;
+    preferred-height: child-layout.preferred-height;
+
+    property <length> bubble-width:  measure-text.preferred-width  + 24px;  // px-3
+    property <length> bubble-height: measure-text.preferred-height + 12px;  // py-1.5
+
+    child-layout := HorizontalLayout {
+        @children
+    }
+
+    trigger-area := TouchArea { }
+
+    // Hidden Text used only to measure the popup's preferred size.
+    measure-text := Text {
+        x: 0;
+        y: 0;
+        width:  0;
+        height: 0;
+        text: root.text;
+        font-size: Tokens.typography-body-sm-size;
+        visible: false;
+    }
+
+    property <bool> trigger-hovered: trigger-area.has-hover;
+    changed trigger-hovered => {
+        if (self.trigger-hovered) { popup.show(); }
+        else                       { popup.close(); }
+    }
+
+    popup := PopupWindow {
+        close-policy: no-auto-close;
+
+        x: side == TooltipSide.left
+            ? -root.bubble-width - 8px :
+           side == TooltipSide.right
+            ? parent.width + 8px :
+           /* top | bottom */
+            (parent.width - root.bubble-width) / 2;
+
+        y: side == TooltipSide.top
+            ? -root.bubble-height - 8px :
+           side == TooltipSide.bottom
+            ? parent.height + 8px :
+           /* left | right */
+            (parent.height - root.bubble-height) / 2;
+
+        width:  root.bubble-width;
+        height: root.bubble-height;
+
+        Rectangle {
+            // shadcn tooltip is inverted: bg-primary + primary-foreground text.
+            background: Tokens.color-primary;
+            border-width: 0px;
+            border-radius: Tokens.radius-md;
+            drop-shadow-blur:     Tokens.shadow-e2-blur;
+            drop-shadow-offset-y: Tokens.shadow-e2-offset-y;
+            drop-shadow-color:    Tokens.shadow-e2-color;
+
+            Text {
+                x: 12px;
+                y: 6px;
+                color: Tokens.color-primary-foreground;
+                font-size: Tokens.typography-label-size;
+                text: root.text;
+            }
+        }
+    }
+}

@@ -1,0 +1,296 @@
+import { Theme } from "../theme.slint";
+import { Card, CardPadding, CardRadius } from "../components/card.slint";
+import { Button, ButtonSize, ButtonVariant } from "../components/button.slint";
+import { ResponsiveGrid } from "../components/responsive-grid.slint";
+import { IconDisplay, IconSet } from "@lucide";
+
+export struct ProxyNode {
+    name: string,
+    type: string,
+    latency: int,
+    latency-state: int,
+}
+
+export struct ProxyGroup {
+    name: string,
+    now: string,
+    open: bool,
+    testing: bool,
+    nodes: [ProxyNode],
+}
+
+export global ProxyModel {
+    in-out property <[ProxyGroup]> groups: [];
+    in-out property <bool> loading: false;
+    in-out property <string> error: "";
+
+    callback toggle-group(int);
+    callback select-node(int, int);
+    callback test-group(int);
+    callback test-node(int, int);
+}
+
+component ProxyNodeCard inherits Card {
+    in property <ProxyNode> data;
+    in property <int> group-index;
+    in property <int> node-index;
+    in property <bool> selected: false;
+
+    card-padding: CardPadding.none;
+    card-radius: CardRadius.md;
+    border-color: root.selected ? Theme.primary
+        : select-touch.has-hover ? Theme.hairline-strong : Theme.hairline;
+
+    select-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { ProxyModel.select-node(root.group-index, root.node-index); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-sm;
+        spacing: Theme.spacing-xs;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: Theme.spacing-xxs;
+
+            node-name-label := Text {
+                text: root.data.name;
+                color: root.selected ? Theme.primary : Theme.ink;
+                font-size: Theme.typography-caption;
+                overflow: elide;
+                horizontal-stretch: 1;
+
+                if self.preferred-width > self.width: Tooltip {
+                    text: @markdown("\{root.data.name}");
+                }
+            }
+
+            node-type-label := Text {
+                text: root.data.type;
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-caption;
+                overflow: elide;
+                horizontal-stretch: 1;
+
+                if self.preferred-width > self.width: Tooltip {
+                    text: @markdown("\{root.data.type}");
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            Button {
+                width: root.data.latency-state == 0 || root.data.latency-state == 1
+                    ? self.height : Theme.typography-display-lg;
+                variant: ButtonVariant.ghost;
+                size: ButtonSize.sm;
+                tips: "测速";
+                disabled: root.data.latency-state == 1;
+                clicked => { ProxyModel.test-node(root.group-index, root.node-index); }
+
+                if root.data.latency-state == 0 || root.data.latency-state == 1: Rectangle {
+                    transform-rotation: root.data.latency-state == 1 ?
+                        animation-tick() / 2s * 360deg :
+                        0deg;
+                    IconDisplay {
+                        icon: root.data.latency-state == 0
+                            ? IconSet.Zap
+                            : IconSet.LoaderCircle;
+                        size: Theme.typography-body-sm;
+                        stroke: Theme.ink-subtle;
+                    }
+                }
+                if root.data.latency-state == 2 || root.data.latency-state == 3: Text {
+                    text: root.data.latency-state == 3 ?
+                        "超时" :
+                        root.data.latency + " ms";
+                    color: root.data.latency-state == 3 ?
+                        Theme.semantic-danger : root.data.latency < 200 ?
+                        Theme.semantic-success : root.data.latency <= 500 ?
+                        Theme.semantic-warning :
+                        Theme.semantic-danger;
+                    font-size: Theme.typography-caption;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component ProxyGroupCard inherits Card {
+    in property <ProxyGroup> data;
+    in property <int> group-index;
+    property <length> action-width: 34px;
+
+    card-padding: CardPadding.none;
+    height: 56px;
+    border-color: header-touch.has-hover ? Theme.hairline-strong : Theme.hairline;
+
+    header-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { ProxyModel.toggle-group(root.group-index); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-md;
+        spacing: Theme.spacing-xs;
+
+        group-name-label := Text {
+            text: root.data.name;
+            color: Theme.ink;
+            font-size: Theme.typography-body-sm;
+            font-weight: Theme.typography-weight-semibold;
+            vertical-alignment: center;
+            horizontal-stretch: 0;
+            overflow: elide;
+
+            if self.preferred-width > self.width: Tooltip {
+                text: @markdown("\{root.data.name}");
+            }
+        }
+
+        if root.data.now != "": current-node-label := Text {
+            text: root.data.now;
+            color: Theme.primary;
+            font-size: Theme.typography-caption;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+
+            if self.preferred-width > self.width: Tooltip {
+                text: @markdown("\{root.data.now}");
+            }
+        }
+        if root.data.now == "": Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: Theme.typography-body;
+                height: Theme.typography-body;
+                transform-rotation: root.data.open ? 90deg : 0deg;
+                animate transform-rotation {
+                    duration: Theme.duration-rotate;
+                    easing: Theme.easing-rotate;
+                }
+                IconDisplay {
+                    icon: IconSet.ChevronRight;
+                    size: Theme.typography-body;
+                    stroke: Theme.ink-subtle;
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            Button {
+                is-icon: true;
+                variant: ButtonVariant.ghost;
+                size: ButtonSize.sm;
+                disabled: root.data.testing;
+                tips: "测速";
+                clicked => { ProxyModel.test-group(root.group-index); }
+                Rectangle {
+                    transform-rotation: root.data.testing ?
+                        animation-tick() / 2s * 360deg :
+                        0deg;
+                    IconDisplay {
+                        icon: root.data.testing ? IconSet.LoaderCircle : IconSet.Zap;
+                        size: Theme.typography-body;
+                        stroke: Theme.ink-subtle;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ProxyGroupLayout inherits Rectangle {
+    in property <ProxyGroup> data;
+    in property <int> group-index;
+
+    property <length> header-height: group-card.height;
+    property <length> content-height: node-grid.height;
+
+    height: root.data.open ? header-height + Theme.spacing-sm + content-height : header-height;
+
+    animate height {
+        duration: Theme.duration-fade;
+        easing: Theme.easing-fade;
+    }
+
+    group-card := ProxyGroupCard {
+        x: 0;
+        y: 0;
+        data: root.data;
+        group-index: root.group-index;
+    }
+
+    node-grid := ResponsiveGrid {
+        y: root.header-height + Theme.spacing-sm;
+        item-count: root.data.open ? root.data.nodes.length : 0;
+        item-height: 60px;
+        visible: root.data.open;
+        opacity: root.data.open ? 1 : 0;
+        animate opacity {
+            duration: Theme.duration-fade;
+            easing: Theme.easing-fade;
+        }
+
+        for node[node-index] in root.data.nodes: ProxyNodeCard {
+            x: node-grid.item-x(node-index);
+            y: node-grid.item-y(node-index);
+            width: node-grid.item-width;
+            height: node-grid.item-height;
+            data: node;
+            group-index: root.group-index;
+            node-index: node-index;
+            selected: root.data.now == node.name;
+        }
+    }
+}
+
+export component ProxyPage inherits Rectangle {
+    Flickable {
+        VerticalLayout {
+            padding: Theme.spacing-md;
+            spacing: Theme.spacing-sm;
+
+            for group[group-index] in ProxyModel.groups: ProxyGroupLayout {
+                data: group;
+                group-index: group-index;
+            }
+        }
+    }
+
+    if ProxyModel.error != "": proxy-error-label := Text {
+        text: ProxyModel.error;
+        color: Theme.semantic-danger;
+        font-size: Theme.typography-caption;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+
+        if self.preferred-width > self.width: Tooltip {
+            text: @markdown("\{ProxyModel.error}");
+        }
+    }
+    if !ProxyModel.loading && ProxyModel.error == "" && ProxyModel.groups.length == 0: Text {
+        text: "暂无代理组";
+        color: Theme.ink-subtle;
+        font-size: Theme.typography-body-sm;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}

@@ -1,0 +1,619 @@
+import { Theme } from "../theme.slint";
+import { AppState } from "../app.slint";
+import { Button, ButtonSize, ButtonVariant } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
+import { FormRow } from "../components/form-row.slint";
+import { Input } from "../components/input.slint";
+import { Select } from "../components/select.slint";
+import { Switch } from "../components/switch.slint";
+import { Tabs, TabsVariant } from "../components/tabs.slint";
+import { ToastVariant, Toaster } from "../components/toast.slint";
+import { IconDisplay, IconSet } from "@lucide";
+import { ListView } from "../components/list-view.slint";
+
+export struct UwpRow {
+    name: string,
+    package-family-name: string,
+    enabled: bool,
+}
+
+export struct ListEntry {
+    value: string,
+}
+
+component ListEditorRow inherits Rectangle {
+    in-out property <string> value;
+    in property <bool> add-mode: false;
+    in property <string> placeholder;
+    callback edited(string);
+    callback added(string);
+    callback removed();
+
+    height: Theme.button-md;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.spacing-xs;
+
+        Input {
+            horizontal-stretch: 1;
+            text <=> root.value;
+            placeholder: root.placeholder;
+            edited(value) => { root.edited(value); }
+        }
+
+        Button {
+            width: Theme.button-md;
+            height: Theme.button-md;
+            size: ButtonSize.sm;
+            is-icon: true;
+            variant: ButtonVariant.ghost;
+            clicked => {
+                if (root.add-mode) {
+                    root.added(root.value);
+                } else {
+                    root.removed();
+                }
+            }
+            IconDisplay {
+                icon: root.add-mode ? IconSet.Plus : IconSet.X;
+                size: Theme.typography-body-sm;
+                stroke: Theme.ink-subtle;
+            }
+        }
+    }
+}
+
+export global SettingsModel {
+    in-out property <int> selected-tab: 0;
+    in-out property <bool> auto-start: false;
+    in-out property <bool> silent-start: false;
+    in-out property <int> theme-index: 0;
+
+    in-out property <int> log-level-index: 0;
+    in-out property <bool> ipv6: true;
+    in-out property <bool> allow-lan: false;
+    in-out property <string> bind-address: "127.0.0.1";
+    in-out property <string> ports-summary: "未配置";
+
+    in-out property <int> tun-stack-index: 1;
+    in-out property <string> tun-device: "clash";
+    in-out property <string> tun-mtu: "9000";
+    in-out property <bool> tun-strict-route: true;
+    in-out property <bool> tun-auto-detect-interface: true;
+    in-out property <bool> tun-auto-route: true;
+    in-out property <string> tun-exclude-address-summary: "暂无";
+    in-out property <string> tun-exclude-interface-summary: "暂无";
+
+    in-out property <bool> uwp-supported: false;
+    in-out property <[UwpRow]> uwp-apps: [];
+    in-out property <string> uwp-search: "";
+    in-out property <string> bypass-list-summary: "暂无";
+
+    in-out property <bool> core-dirty: false;
+    in-out property <bool> applying-core: false;
+    in-out property <bool> operation-busy: false;
+
+    in-out property <int> dialog-kind: 0;
+    in-out property <int> dialog-list-kind: 0;
+    in-out property <[ListEntry]> dialog-list-items: [];
+    in-out property <string> dialog-list-draft: "";
+    in-out property <string> dialog-list-new-draft: "";
+    in-out property <string> port-mixed-draft: "";
+    in-out property <string> port-http-draft: "";
+    in-out property <string> port-socks-draft: "";
+
+    in-out property <bool> toast-visible: false;
+    in-out property <string> toast-message: "";
+    in-out property <int> toast-variant: 0;
+
+    callback toggle-auto-start(bool);
+    callback toggle-silent-start(bool);
+    callback change-log-level(int);
+    callback toggle-ipv6(bool);
+    callback toggle-allow-lan(bool);
+    callback submit-bind-address(string);
+    callback open-ports();
+    callback submit-ports(string, string, string);
+    callback change-tun-stack(int);
+    callback submit-tun-device(string);
+    callback submit-tun-mtu(string);
+    callback toggle-tun-strict-route(bool);
+    callback toggle-tun-auto-detect-interface(bool);
+    callback toggle-tun-auto-route(bool);
+    callback open-list(int);
+    callback edit-list-item(int, string);
+    callback add-list-item(string);
+    callback remove-list-item(int);
+    callback save-list(int, string);
+    callback reset-list(int);
+    callback open-uwp();
+    callback search-uwp(string);
+    callback toggle-uwp(string, bool);
+    callback save-uwp();
+    callback close-dialog();
+    callback apply-core();
+}
+
+component SummaryText inherits Text {
+    horizontal-stretch: 1;
+    text: "";
+    color: Theme.ink-subtle;
+    font-size: Theme.typography-body-sm;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+export component SettingsPage inherits Rectangle {
+    VerticalLayout {
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-md;
+        padding-top: Theme.spacing-sm;
+        padding-bottom: Theme.spacing-md;
+        spacing: Theme.spacing-xs;
+
+        HorizontalLayout {
+            Tabs {
+                horizontal-stretch: 0;
+                variant: TabsVariant.line;
+                items: [
+                    { label: "应用设置" },
+                    { label: "核心设置" },
+                    { label: "TUN 设置" },
+                    { label: "代理设置" },
+                ];
+                current <=> SettingsModel.selected-tab;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+
+        body-viewport := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+
+            body-scroll := Flickable {
+                property <length> has-save-btn-height: Theme.button-lg + Theme.spacing-md + body-content.preferred-height;
+
+                height: parent.height;
+                viewport-width: self.width;
+                viewport-height: SettingsModel.core-dirty && has-save-btn-height > parent.height
+                    ? has-save-btn-height
+                    : body-content.preferred-height;
+
+                body-content := VerticalLayout {
+                    if SettingsModel.selected-tab == 0: VerticalLayout {
+                        FormRow {
+                            label: "开机自启";
+                            Switch {
+                                checked <=> SettingsModel.auto-start;
+                                disabled: SettingsModel.operation-busy;
+                                toggled(value) => { SettingsModel.toggle-auto-start(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "静默启动";
+                            Switch {
+                                checked <=> SettingsModel.silent-start;
+                                disabled: SettingsModel.operation-busy;
+                                toggled(value) => { SettingsModel.toggle-silent-start(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "主题";
+                            Select {
+                                width: 220px;
+                                height: parent.form-height;
+                                items: [
+                                    { value: "system", label: "跟随系统" },
+                                    { value: "light", label: "浅色" },
+                                    { value: "dark", label: "深色" },
+                                ];
+                                selected-index <=> SettingsModel.theme-index;
+                                disabled: SettingsModel.operation-busy;
+                                changed(index) => { AppState.change-theme(index); }
+                            }
+                        }
+                    }
+
+                    if SettingsModel.selected-tab == 1: VerticalLayout {
+                        FormRow {
+                            label: "日志等级";
+                            Select {
+                                width: 220px;
+                                height: parent.form-height;
+                                items: [
+                                    { value: "silent", label: "silent" },
+                                    { value: "error", label: "error" },
+                                    { value: "warning", label: "warning" },
+                                    { value: "info", label: "info" },
+                                    { value: "debug", label: "debug" },
+                                ];
+                                selected-index <=> SettingsModel.log-level-index;
+                                disabled: SettingsModel.applying-core;
+                                changed(index) => { SettingsModel.change-log-level(index); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "允许 IPv6";
+                            Switch {
+                                checked <=> SettingsModel.ipv6;
+                                disabled: SettingsModel.applying-core;
+                                toggled(value) => { SettingsModel.toggle-ipv6(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "允许局域网";
+                            Switch {
+                                checked <=> SettingsModel.allow-lan;
+                                disabled: SettingsModel.applying-core;
+                                toggled(value) => { SettingsModel.toggle-allow-lan(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "监听地址";
+                            Input {
+                                width: 220px;
+                                height: parent.form-height;
+                                text <=> SettingsModel.bind-address;
+                                enabled: !SettingsModel.applying-core;
+                                accepted(value) => { SettingsModel.submit-bind-address(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "端口设置";
+                            SummaryText {
+                                text: SettingsModel.ports-summary;
+                            }
+
+                            Button {
+                                variant: ButtonVariant.outline;
+                                is-icon: true;
+                                disabled: SettingsModel.applying-core;
+                                clicked => { SettingsModel.open-ports(); }
+                                IconDisplay {
+                                    icon: IconSet.SquarePen;
+                                    size: Theme.typography-body;
+                                    stroke: Theme.ink-subtle;
+                                }
+                            }
+                        }
+                    }
+
+                    if SettingsModel.selected-tab == 2: VerticalLayout {
+                        FormRow {
+                            label: "协议栈";
+                            Select {
+                                width: 220px;
+                                height: parent.form-height;
+                                items: [
+                                    { value: "system", label: "system" },
+                                    { value: "gvisor", label: "gvisor" },
+                                    { value: "mixed", label: "mixed" },
+                                ];
+                                selected-index <=> SettingsModel.tun-stack-index;
+                                disabled: SettingsModel.applying-core;
+                                changed(index) => { SettingsModel.change-tun-stack(index); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "网卡名称";
+                            Input {
+                                width: 220px;
+                                height: parent.form-height;
+                                text <=> SettingsModel.tun-device;
+                                enabled: !SettingsModel.applying-core;
+                                accepted(value) => { SettingsModel.submit-tun-device(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "MTU";
+                            Input {
+                                width: 220px;
+                                height: parent.form-height;
+                                text <=> SettingsModel.tun-mtu;
+                                enabled: !SettingsModel.applying-core;
+                                accepted(value) => { SettingsModel.submit-tun-mtu(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "严格路由";
+                            Switch {
+                                checked <=> SettingsModel.tun-strict-route;
+                                disabled: SettingsModel.applying-core;
+                                toggled(value) => { SettingsModel.toggle-tun-strict-route(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "自动出口";
+                            Switch {
+                                checked <=> SettingsModel.tun-auto-detect-interface;
+                                disabled: SettingsModel.applying-core;
+                                toggled(value) => { SettingsModel.toggle-tun-auto-detect-interface(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "自动路由";
+                            Switch {
+                                checked <=> SettingsModel.tun-auto-route;
+                                disabled: SettingsModel.applying-core;
+                                toggled(value) => { SettingsModel.toggle-tun-auto-route(value); }
+                            }
+                        }
+
+                        FormRow {
+                            label: "排除网段";
+                            SummaryText {
+                                text: SettingsModel.tun-exclude-address-summary;
+                            }
+
+                            Button {
+                                variant: ButtonVariant.outline;
+                                disabled: SettingsModel.applying-core;
+                                clicked => { SettingsModel.open-list(0); }
+                                IconDisplay {
+                                    icon: IconSet.SquarePen;
+                                    size: Theme.typography-body;
+                                    stroke: Theme.ink-subtle;
+                                }
+                            }
+                        }
+
+                        FormRow {
+                            label: "排除接口";
+                            SummaryText {
+                                text: SettingsModel.tun-exclude-interface-summary;
+                            }
+
+                            Button {
+                                variant: ButtonVariant.outline;
+                                disabled: SettingsModel.applying-core;
+                                clicked => { SettingsModel.open-list(1); }
+                                IconDisplay {
+                                    icon: IconSet.SquarePen;
+                                    size: Theme.typography-body;
+                                    stroke: Theme.ink-subtle;
+                                }
+                            }
+                        }
+                    }
+
+                    if SettingsModel.selected-tab == 3: VerticalLayout {
+                        if SettingsModel.uwp-supported: FormRow {
+                            label: "UWP 设置";
+                            Button {
+                                variant: ButtonVariant.outline;
+                                disabled: SettingsModel.operation-busy;
+                                clicked => { SettingsModel.open-uwp(); }
+                                IconDisplay {
+                                    icon: IconSet.SquarePen;
+                                    size: Theme.typography-body;
+                                    stroke: Theme.ink-subtle;
+                                }
+                            }
+                        }
+                        FormRow {
+                            label: "跳过代理";
+                            SummaryText {
+                                text: SettingsModel.bypass-list-summary;
+                            }
+
+                            Button {
+                                variant: ButtonVariant.outline;
+                                disabled: SettingsModel.operation-busy;
+                                clicked => { SettingsModel.open-list(2); }
+                                IconDisplay {
+                                    icon: IconSet.SquarePen;
+                                    size: Theme.typography-body;
+                                    stroke: Theme.ink-subtle;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if SettingsModel.core-dirty: Button {
+        x: root.width - self.width - Theme.spacing-lg;
+        y: root.height - self.height - Theme.spacing-lg;
+        width: 120px;
+        text: "应用配置";
+        size: ButtonSize.lg;
+        variant: ButtonVariant.default;
+        disabled: SettingsModel.applying-core;
+        clicked => { SettingsModel.apply-core(); }
+    }
+
+    ports-dialog := Dialog {
+        width: root.width;
+        height: root.height;
+        open: SettingsModel.dialog-kind == 1;
+        title: "端口设置";
+        description: "三者不可全空；混合端口有值时忽略 HTTP 与 SOCKS。";
+        dismissed => { SettingsModel.close-dialog(); }
+
+        VerticalLayout {
+            spacing: Theme.spacing-sm;
+            Input {
+                text <=> SettingsModel.port-mixed-draft;
+                placeholder: "混合端口 mixed-port";
+            }
+
+            Input {
+                text <=> SettingsModel.port-http-draft;
+                placeholder: "HTTP 端口 port";
+            }
+
+            Input {
+                text <=> SettingsModel.port-socks-draft;
+                placeholder: "SOCKS 端口 socks-port";
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing-xs;
+                Button {
+                    variant: ButtonVariant.ghost;
+                    text: "取消";
+                    clicked => { SettingsModel.close-dialog(); }
+                }
+
+                Button {
+                    text: "保存";
+                    clicked => {
+                        SettingsModel.submit-ports(SettingsModel.port-mixed-draft,
+                        SettingsModel.port-http-draft, SettingsModel.port-socks-draft);
+                    }
+                }
+            }
+        }
+    }
+
+    list-dialog := Dialog {
+        open: SettingsModel.dialog-kind == 2;
+        title: SettingsModel.dialog-list-kind == 0 ? "排除网段" :
+            (SettingsModel.dialog-list-kind == 1 ? "排除接口" : "跳过代理");
+        dismissed => { SettingsModel.close-dialog(); }
+
+        VerticalLayout {
+            spacing: Theme.spacing-sm;
+            if SettingsModel.dialog-list-items.length == 0: Text {
+                text: "暂无内容，请在下方添加";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-body-sm;
+            }
+            ListView {
+                property <length> content-height: SettingsModel.dialog-list-items.length * Theme.button-md
+                    + (SettingsModel.dialog-list-items.length - 1) * Theme.spacing-sm;
+                height: content-height < 320px ? content-height : 320px;
+                for item[index] in SettingsModel.dialog-list-items: HorizontalLayout {
+                    states [
+                        has-padding when index < SettingsModel.dialog-list-items.length - 1: {
+                            padding-bottom: Theme.spacing-sm;
+                        }
+                    ]
+                    ListEditorRow {
+                        value: item.value;
+                        placeholder: "填写一项";
+                        edited(value) => { SettingsModel.edit-list-item(index, value); }
+                        removed => { SettingsModel.remove-list-item(index); }
+                    }
+                }
+            }
+
+            ListEditorRow {
+                value <=> SettingsModel.dialog-list-new-draft;
+                add-mode: true;
+                placeholder: "新增一项";
+                added(value) => { SettingsModel.add-list-item(value); }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing-xs;
+                if SettingsModel.dialog-list-kind == 0 || SettingsModel.dialog-list-kind == 2: Button {
+                    variant: ButtonVariant.ghost;
+                    text: "恢复默认";
+                    clicked => {
+                        SettingsModel.reset-list(SettingsModel.dialog-list-kind);
+                    }
+                }
+                Button {
+                    variant: ButtonVariant.ghost;
+                    text: "取消";
+                    clicked => { SettingsModel.close-dialog(); }
+                }
+                Button {
+                    text: "保存";
+                    clicked => {
+                        SettingsModel.save-list(SettingsModel.dialog-list-kind,
+                        SettingsModel.dialog-list-draft);
+                    }
+                }
+            }
+        }
+    }
+
+    uwp-dialog := Dialog {
+        width: root.width;
+        height: root.height;
+        open: SettingsModel.dialog-kind == 3;
+        title: "UWP 回环代理";
+        dismissed => { SettingsModel.close-dialog(); }
+
+        VerticalLayout {
+            spacing: Theme.spacing-sm;
+            Input {
+                text <=> SettingsModel.uwp-search;
+                placeholder: "搜索应用名称";
+                edited(value) => { SettingsModel.search-uwp(value); }
+            }
+
+            apps := Flickable {
+                height: 240px;
+                viewport-width: self.width;
+                viewport-height: uwp-list.preferred-height;
+                uwp-list := VerticalLayout {
+                    width: apps.width;
+                    spacing: Theme.spacing-xxs;
+                    for app in SettingsModel.uwp-apps: FormRow {
+                        label: app.name;
+                        Switch {
+                            checked: app.enabled;
+                            disabled: SettingsModel.operation-busy;
+                            toggled(value) => {
+                                SettingsModel.toggle-uwp(app.package-family-name, value);
+                            }
+                        }
+                    }
+                    if SettingsModel.uwp-apps.length == 0: Text {
+                        text: "暂无匹配应用";
+                        color: Theme.ink-subtle;
+                        font-size: Theme.typography-body-sm;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    variant: ButtonVariant.ghost;
+                    text: "取消";
+                    clicked => { SettingsModel.close-dialog(); }
+                }
+                Button {
+                    variant: ButtonVariant.default;
+                    disabled: SettingsModel.operation-busy;
+                    text: "保存";
+                    clicked => { SettingsModel.save-uwp(); }
+                }
+            }
+        }
+    }
+
+    Toaster {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        shown <=> SettingsModel.toast-visible;
+        text: SettingsModel.toast-message;
+        variant: SettingsModel.toast-variant == 1 ? ToastVariant.success
+            : (SettingsModel.toast-variant == 2 ? ToastVariant.error : ToastVariant.default);
+    }
+}

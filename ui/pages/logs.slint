@@ -1,0 +1,185 @@
+import { Theme } from "../theme.slint";
+import { Button, ButtonVariant } from "../components/button.slint";
+import { IconDisplay, IconSet } from "@lucide";
+import { Input } from "../components/input.slint";
+import { Select, SelectItem } from "../components/select.slint";
+import { Tabs, TabItem, TabsVariant } from "../components/tabs.slint";
+import { ListView } from "../components/list-view.slint";
+import { Separator } from "../components/separator.slint";
+
+export struct LogRow {
+    time: string,
+    level: string,
+    message: string,
+    level-index: int,
+}
+
+export global LogsModel {
+    in-out property <[LogRow]> rows: [];
+    in-out property <int> selected-tab: 0;
+    in-out property <int> all-level-index: 3;
+    in-out property <string> query: "";
+    in-out property <bool> paused: false;
+    in-out property <int> scroll-revision: 0;
+
+    callback select-tab(int);
+    callback select-all-level(int);
+    callback search-changed(string);
+    callback toggle-pause();
+    callback clear();
+}
+
+export component LogsPage inherits Rectangle {
+    property <length> time-width: 50px;
+    property <length> level-width: 50px;
+
+    VerticalLayout {
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-md;
+        padding-top: Theme.spacing-sm;
+        padding-bottom: Theme.spacing-md;
+        spacing: Theme.spacing-xs;
+
+        HorizontalLayout {
+            tabs := Tabs {
+                horizontal-stretch: 0;
+                variant: TabsVariant.line;
+                items: [
+                    { label: "all" },
+                    { label: "error" },
+                    { label: "warning" },
+                    { label: "info" },
+                    { label: "debug" },
+                ];
+                current <=> LogsModel.selected-tab;
+                changed(index) => { LogsModel.select-tab(index); }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.spacing-xs;
+
+            search-box := Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.surface-2;
+                border-width: Theme.border-width;
+                border-color: Theme.hairline;
+                border-radius: Theme.rounded-md;
+
+                IconDisplay {
+                    x: Theme.spacing-sm;
+                    y: (parent.height - self.height) / 2;
+                    icon: IconSet.Search;
+                    size: Theme.typography-body;
+                    stroke: Theme.ink-subtle;
+                }
+
+                Input {
+                    x: 32px;
+                    width: parent.width - 32px;
+                    background: transparent;
+                    border-width: 0px;
+                    text <=> LogsModel.query;
+                    placeholder: "搜索日志";
+                    edited => { LogsModel.search-changed(self.text); }
+                }
+            }
+
+            if LogsModel.selected-tab == 0: Select {
+                width: 100px;
+                items: [
+                    { value: "error", label: "error" },
+                    { value: "warning", label: "warning" },
+                    { value: "info", label: "info" },
+                    { value: "debug", label: "debug" },
+                ];
+                selected-index <=> LogsModel.all-level-index;
+                changed(index) => { LogsModel.select-all-level(index); }
+            }
+
+            Button {
+                is-icon: true;
+                variant: ButtonVariant.ghost;
+                tips: LogsModel.paused ? "恢复滚动" : "暂停滚动";
+                clicked => { LogsModel.toggle-pause(); }
+                IconDisplay {
+                    icon: LogsModel.paused ? IconSet.Play : IconSet.Pause;
+                    size: Theme.typography-body;
+                    stroke: Theme.ink-subtle;
+                }
+            }
+
+            Button {
+                is-icon: true;
+                variant: ButtonVariant.ghost;
+                tips: "清空日志";
+                clicked => { LogsModel.clear(); }
+                IconDisplay {
+                    icon: IconSet.Trash2;
+                    size: Theme.typography-body;
+                    stroke: Theme.ink-subtle;
+                }
+            }
+        }
+
+        Rectangle {
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                auto-scroll: !LogsModel.paused;
+                scroll-revision: LogsModel.scroll-revision;
+
+                for row[index] in LogsModel.rows: VerticalLayout {
+                    HorizontalLayout {
+                        padding: Theme.spacing-xs;
+                        spacing: Theme.spacing-xs;
+
+                        Text {
+                            width: root.time-width;
+                            text: row.time;
+                            color: Theme.ink-subtle;
+                            font-size: Theme.typography-mono;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            width: root.level-width;
+                            text: row.level;
+                            color: row.level-index == 0 ? Theme.semantic-danger
+                                : row.level-index == 1 ? Theme.semantic-warning
+                                : row.level-index == 2 ? Theme.primary-hover
+                                : Theme.ink-tertiary;
+                            font-size: Theme.typography-mono;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        message-label := Text {
+                            horizontal-stretch: 1;
+                            text: row.message;
+                            color: Theme.ink;
+                            font-size: Theme.typography-mono;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if index < LogsModel.rows.length - 1:Separator { }
+                }
+            }
+
+            if LogsModel.rows.length == 0: Text {
+                text: "暂无日志";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-body-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

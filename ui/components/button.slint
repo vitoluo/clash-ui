@@ -1,0 +1,201 @@
+// 改造自 slintcn button 源码，按本项目规范重写。
+// 配色由 Tokens.* 改为 Theme.*（强调色 Theme.primary）；
+// is-icon 为 true 时居中渲染 @lucide 图标，其余交互/属性/回调不变。
+
+import { Theme } from "../theme.slint";
+import { IconDisplay, IconSet } from "@lucide";
+import { FocusRing } from "focus-ring.slint";
+
+export enum ButtonVariant {
+    default,
+    outline,
+    secondary,
+    ghost,
+    link,
+    destructive,
+    glow,
+    glass,
+}
+
+export enum ButtonSize {
+    xs,
+    sm,
+    default,
+    lg,
+}
+
+export component Button inherits Rectangle {
+    in property <ButtonVariant> variant: ButtonVariant.default;
+    in property <ButtonSize> size:    ButtonSize.default;
+    in property <string> text;
+    in property <bool> disabled: false;
+    in property <bool> haspopup: false;
+    in property <bool> rounded: false;
+    in property <bool> is-icon: false;
+    in property <string> tips;
+    callback clicked();
+
+    property <bool> pointer-focus: false;
+
+    // 水平内边距复用 DESIGN.md spacing 标准。
+    in property <length> hpad:
+        size == ButtonSize.xs ? Theme.spacing-xs :
+        size == ButtonSize.sm ? Theme.spacing-sm :
+        size == ButtonSize.lg ? Theme.spacing-lg : Theme.spacing-md;
+
+    property <length> btn-h:
+        size == ButtonSize.xs ? Theme.button-xs :
+        size == ButtonSize.sm ? Theme.button-sm :
+        size == ButtonSize.lg ? Theme.button-lg : Theme.button-md;
+
+    in property <length> radius: rounded ? btn-h / 2 : Theme.rounded-md;
+
+    height: btn-h;
+    width: is-icon ? self.height : label.preferred-width + 2 * hpad;
+
+    // 各变体配色（rest/hover 两态，统一引用 Theme.*）。
+    property <color> bg-rest:
+        variant == ButtonVariant.outline ? Theme.surface-2 :
+        variant == ButtonVariant.secondary ? Theme.surface-2 :
+        variant == ButtonVariant.ghost ? transparent :
+        variant == ButtonVariant.link ? transparent :
+        variant == ButtonVariant.destructive ? Theme.semantic-danger :
+        variant == ButtonVariant.glass ? Theme.surface-2 :
+        /* default | glow */                   Theme.primary;
+
+    in property <color> bg-hover:
+        variant == ButtonVariant.outline ? Theme.surface-2 :
+        variant == ButtonVariant.secondary ? Theme.hover :
+        variant == ButtonVariant.ghost ? Theme.hover :
+        variant == ButtonVariant.link ? transparent :
+        variant == ButtonVariant.destructive ? Theme.hover :
+        variant == ButtonVariant.glass ? Theme.hover :
+        /* default | glow */                   Theme.primary-hover;
+
+    property <length> border-w:
+        variant == ButtonVariant.outline
+        || variant == ButtonVariant.secondary
+        || variant == ButtonVariant.glass ? Theme.border-width : 0px;
+    property <color> border-rest:
+        variant == ButtonVariant.outline
+        || variant == ButtonVariant.secondary
+        || variant == ButtonVariant.glass
+        ? Theme.hairline : transparent;
+    property <color> border-hover:
+        variant == ButtonVariant.secondary ? Theme.hairline :
+        variant == ButtonVariant.outline || variant == ButtonVariant.glass
+        ? Theme.hairline-strong : transparent;
+
+    property <color> fg-rest:
+        variant == ButtonVariant.default || variant == ButtonVariant.glow
+        ? Theme.on-primary :
+        variant == ButtonVariant.destructive ? Theme.semantic-danger :
+        variant == ButtonVariant.link ? Theme.primary :
+        variant == ButtonVariant.ghost || variant == ButtonVariant.outline
+        ? Theme.ink-subtle :
+        /* secondary | glass */                Theme.ink;
+    property <color> fg-hover:
+        variant == ButtonVariant.default || variant == ButtonVariant.glow
+        ? Theme.on-primary :
+        variant == ButtonVariant.destructive ? Theme.semantic-danger :
+        variant == ButtonVariant.link ? Theme.primary-hover :
+        variant == ButtonVariant.ghost || variant == ButtonVariant.outline
+        ? Theme.ink-subtle :
+        /* secondary | glass */                Theme.ink;
+
+    out property <bool> interactive-hover: touch.has-hover && !disabled;
+    property <bool> pressed-down: touch.pressed && !root.disabled;
+
+    opacity: root.disabled ? Theme.disabled-opacity : 1.0;
+
+    surface := Rectangle {
+        x: 0;
+        y: (root.pressed-down && !root.haspopup) ? 1px : 0px;
+        width: parent.width;
+        height: parent.height;
+        border-radius: radius;
+
+        background: interactive-hover ? bg-hover : bg-rest;
+        border-width: border-w;
+        border-color: interactive-hover ? border-hover : border-rest;
+
+        animate background, border-color {
+            duration: Theme.duration-hover;
+            easing: Theme.easing-hover;
+        }
+        animate y {
+            duration: Theme.duration-click;
+            easing: Theme.easing-click;
+        }
+
+        label := Text {
+            x: (parent.width - self.preferred-width) / 2;
+            y: (parent.height - self.preferred-height) / 2;
+            text: root.text;
+            color: interactive-hover ? fg-hover : fg-rest;
+            font-size: size == ButtonSize.xs ? Theme.typography-caption
+                : size == ButtonSize.sm || size == ButtonSize.default
+                ? Theme.typography-body-sm
+                : Theme.typography-body;
+            font-weight: Theme.typography-weight-medium;
+            visible: root.text != "";
+        }
+
+        // 图标按钮图标居中显示
+        HorizontalLayout {
+            alignment: center;
+            cross-axis-alignment: center;
+            @children
+        }
+
+        if variant == ButtonVariant.link && interactive-hover && root.text != "": Rectangle {
+            x: label.x;
+            y: label.y + label.preferred-height - 2px;
+            width: label.preferred-width;
+            height: 1px;
+            background: Theme.primary;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: root.disabled ? default : pointer;
+        pointer-event(ev) => {
+            if (!root.disabled
+                && ev.button == PointerEventButton.left
+                && ev.kind == PointerEventKind.down) {
+                root.pointer-focus = true;
+            }
+        }
+        clicked => {
+            if (!root.disabled) {
+                focus-scope.focus();
+                root.clicked();
+            }
+        }
+    }
+
+    forward-focus: focus-scope;
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            root.pointer-focus = false;
+            if (event.text == "\n" || event.text == " ") {
+                if (!root.disabled) { root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if focus-scope.has-focus && !root.pointer-focus: FocusRing {
+        host-width: parent.width;
+        host-height: parent.height;
+        radius: radius;
+    }
+
+    if root.tips != "":Tooltip {
+        text: @markdown("\{root.tips}");
+    }
+}

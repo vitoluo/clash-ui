@@ -1,0 +1,97 @@
+// 自定义标题栏：自绘标题区，原生边框/阴影由平台层保留（仅去系统标题栏）。
+//
+// 提供拖拽、最小化/最大化/关闭回调（关闭=最小化到托盘，不退出应用）。
+// 主题选择由设置页统一管理。
+
+import { Theme } from "../theme.slint";
+import { Button, ButtonVariant, ButtonSize } from "button.slint";
+import { IconDisplay, IconSet } from "@lucide";
+
+export component TitleBar inherits Rectangle {
+    callback start-drag();
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+
+    height: Theme.button-md;
+    background: Theme.surface-1;
+
+    VerticalLayout {
+        HorizontalLayout {
+            padding-left: Theme.spacing-sm;
+
+            // 拖拽区（标题文字）。拖动窗口；双击切换最大化/还原。
+            drag-area := TouchArea {
+                horizontal-stretch: 1;
+                moved => { root.start-drag(); }
+                double-clicked => { root.toggle-maximize(); }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: Theme.spacing-xs;
+                    Text {
+                        text: "Clash UI";
+                        color: Theme.ink;
+                        font-size: Theme.typography-body-sm;
+                        font-weight: Theme.typography-weight-semibold;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // 最小化
+            min-btn := Button {
+                width: Theme.button-md + Theme.spacing-sm;
+                variant: ButtonVariant.ghost;
+                is-icon: true;
+                radius: 0;
+                clicked => { root.minimize(); }
+                HorizontalLayout {
+                    alignment: center;
+                    cross-axis-alignment: center;
+                    IconDisplay {
+                        icon: IconSet.Minus;
+                        size: Theme.typography-body;
+                        stroke: min-btn.interactive-hover ? Theme.ink-muted : Theme.ink-subtle;
+                    }
+                }
+            }
+
+            // 最大化 / 还原
+            max-btn := Button {
+                width: Theme.button-md + Theme.spacing-sm;
+                variant: ButtonVariant.ghost;
+                is-icon: true;
+                radius: 0;
+                clicked => { root.toggle-maximize(); }
+                HorizontalLayout {
+                    alignment: center;
+                    cross-axis-alignment: center;
+                    IconDisplay {
+                        icon: IconSet.Square;
+                        size: Theme.typography-body;
+                        stroke: max-btn.interactive-hover ? Theme.ink-muted : Theme.ink-subtle;
+                    }
+                }
+            }
+
+            // 关闭（最小化到托盘，不退出应用）
+            close-btn := Button {
+                width: Theme.button-md + Theme.spacing-sm;
+                variant: ButtonVariant.ghost;
+                is-icon: true;
+                bg-hover: Theme.semantic-danger;
+                radius: 0;
+                clicked => { root.close-window(); }
+                HorizontalLayout {
+                    alignment: center;
+                    cross-axis-alignment: center;
+                    IconDisplay {
+                        icon: IconSet.X;
+                        size: Theme.typography-body;
+                        stroke: close-btn.interactive-hover ? Theme.on-primary : Theme.ink-subtle;
+                    }
+                }
+            }
+        }
+    }
+}

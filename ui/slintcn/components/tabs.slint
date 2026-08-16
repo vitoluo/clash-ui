@@ -1,0 +1,153 @@
+// slintcn Tabs — segmented control (shadcn default style).
+//
+// A muted-background pill container holds the triggers; the active trigger
+// lifts onto a bg-background surface with a subtle shadow. Slint's @children
+// is a single slot, so Tabs is the nav strip only — drive content from
+// `current`:
+//
+//   in-out property <int> active-tab: 0;
+//   HorizontalLayout {            // size Tabs to its content, not full width
+//       alignment: start;
+//       Tabs {
+//           items: [{ label: "Account" }, { label: "Password" }];
+//           current <=> active-tab;
+//       }
+//   }
+//   if active-tab == 0: VerticalLayout { /* Account content */ }
+//
+// Keyboard: Tab focuses the strip; ← / → cycle the active tab (wrap-around).
+
+import { Tokens } from "../theme/tokens.slint";
+import { FocusRing } from "focus-ring.slint";
+
+export struct TabItem { label: string }
+
+// default: segmented control (muted pill + raised active trigger).
+// line:    underline strip (transparent, active trigger underlined).
+export enum TabsVariant { default, line }
+
+export component Tabs inherits Rectangle {
+    // Tab definitions in display order.
+    in property <[TabItem]> items;
+    // Two-way; index of the active tab.
+    in-out property <int> current: 0;
+    // Style — `default` (segmented) or `line` (underlined).
+    in property <TabsVariant> variant: TabsVariant.default;
+    // Fired with the new `current` index.
+    callback changed(int);
+
+    property <bool> segmented: variant == TabsVariant.default;
+    property <bool> pointer-focus: false;
+
+    // TabsList container: bg-muted + rounded for segmented; bare for line.
+    background: segmented ? Tokens.color-muted : transparent;
+    border-radius: Tokens.radius-lg;
+    height: segmented ? 36px : 40px;
+
+    forward-focus: nav;
+    nav := FocusScope {
+        // Zero-size so the scope cannot intercept the first pointer press
+        // (default FocusScope fills its parent and swallows that click).
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            root.pointer-focus = false;
+            if (event.text == Key.LeftArrow) {
+                if (root.items.length > 0) {
+                    root.current = mod(root.current + root.items.length - 1, root.items.length);
+                    root.changed(root.current);
+                }
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                if (root.items.length > 0) {
+                    root.current = mod(root.current + 1, root.items.length);
+                    root.changed(root.current);
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    HorizontalLayout {
+        padding: root.segmented ? 4px : 0px;    // p-1 for segmented
+        spacing: 4px;
+
+        for item[idx] in items: Rectangle {
+            property <bool> active: idx == root.current;
+
+            min-width: label-text.preferred-width + 24px;   // px-3 each side
+
+            surface := Rectangle {
+                x: 0;
+                y: touch.pressed ? 1px : 0px;
+                width:  parent.width;
+                height: parent.height;
+
+                // Segmented: active lifts onto a bg-background surface (shadow-sm).
+                // Line: transparent, active marked by the underline below.
+                background: root.segmented
+                    ? (active
+                        ? Tokens.color-background
+                        : (touch.has-hover ? Tokens.color-surface-1 : transparent))
+                    : (touch.has-hover && !active ? Tokens.color-surface-1 : transparent);
+                border-radius: Tokens.radius-md;
+
+                drop-shadow-blur:     root.segmented && active ? Tokens.shadow-e2-blur  : 0px;
+                drop-shadow-offset-y: root.segmented && active ? 1px                    : 0px;
+                drop-shadow-color:    root.segmented && active ? Tokens.shadow-e2-color : transparent;
+
+                label-text := Text {
+                    x: (parent.width  - self.preferred-width)  / 2;
+                    y: (parent.height - self.preferred-height) / 2;
+                    text: item.label;
+                    color: active
+                        ? Tokens.color-foreground
+                        : Tokens.color-muted-foreground;
+                    font-size: Tokens.typography-body-size;
+                    font-weight: active
+                        ? Tokens.typography-weight-semibold
+                        : Tokens.typography-weight-medium;
+                }
+
+                // Line variant: 2px underline under the active trigger.
+                if !root.segmented && active: Rectangle {
+                    x: 10px;
+                    y: parent.height - 2px;
+                    width: parent.width - 20px;
+                    height: 2px;
+                    background: Tokens.color-foreground;
+                    border-radius: 1px;
+                }
+
+                animate y, background, drop-shadow-blur {
+                    duration: Tokens.motion-fast;
+                    easing: Tokens.motion-easing-standard;
+                }
+            }
+
+            touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.current = idx;
+                    root.changed(idx);
+                    nav.focus();
+                }
+                pointer-event(ev) => {
+                    if (ev.button == PointerEventButton.left
+                            && ev.kind == PointerEventKind.down) {
+                        root.pointer-focus = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Focus ring around the whole strip — keyboard-only.
+    if nav.has-focus && !root.pointer-focus : FocusRing {
+        host-width: parent.width;
+        host-height: parent.height;
+        radius: Tokens.radius-lg + Tokens.focus-ring-offset;
+    }
+}

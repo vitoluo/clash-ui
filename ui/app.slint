@@ -1,0 +1,17 @@
+// 全局应用状态：主题模式与当前导航页。
+// 由 src/main.rs 初始化并接线回调；UI 仅通过本全局读写状态。
+
+export global AppState {
+    // 主题模式：0=跟随系统, 1=浅色, 2=深色
+    in-out property <int> theme-mode: 0;
+    // 当前导航页索引（0..7，对应主页/代理/规则/配置/覆写/连接/日志/设置）
+    in-out property <int> current-page: 0;
+    // 切换主题（传目标模式 0/1/2），由 Rust 侧持久化并刷新 Theme.dark
+    callback change-theme(int);
+    // 导航到指定页（传页索引）
+    callback navigate(int);
+    // 非管理员开启 TUN 时的权限确认。
+    in-out property <bool> tun-confirm-open: false;
+    callback confirm-tun-enable();
+    callback cancel-tun-enable();
+}

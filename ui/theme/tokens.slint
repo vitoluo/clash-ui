@@ -1,0 +1,96 @@
+// 主题标准语义层：组件直接复用设计规范中的颜色、间距、圆角和排版尺度。
+
+import { Palette } from "palette.slint";
+
+export global Theme {
+    // 主题模式：true 为深色，false 为浅色
+    in-out property <bool> dark: true;
+
+    // 设计规范颜色语义
+    out property <color> canvas: dark ? Palette.canvas-dark : Palette.canvas-light;
+    out property <color> surface-1: dark ? Palette.surface-1-dark : Palette.surface-1-light;
+    out property <color> surface-2: dark ? Palette.surface-2-dark : Palette.surface-2-light;
+    out property <color> hairline: dark ? Palette.hairline-dark : Palette.hairline-light;
+    out property <color> hairline-strong: dark ? Palette.hairline-strong-dark : Palette.hairline-strong-light;
+    out property <color> ink: dark ? Palette.ink-dark : Palette.ink-light;
+    out property <color> ink-muted: dark ? Palette.ink-muted-dark : Palette.ink-muted-light;
+    out property <color> ink-subtle: dark ? Palette.ink-subtle-dark : Palette.ink-subtle-light;
+    out property <color> ink-tertiary: dark ? Palette.ink-tertiary-dark : Palette.ink-tertiary-light;
+    out property <color> primary: Palette.primary;
+    out property <color> on-primary: Palette.on-primary;
+    out property <color> primary-hover: Palette.primary-hover;
+    out property <color> primary-focus: Palette.primary-focus;
+    out property <color> brand-secure: Palette.brand-secure;
+    out property <color> semantic-success: Palette.semantic-success;
+
+    // 项目业务语义色：设计规范未提供，但由页面业务状态使用
+    out property <color> overlay: Palette.semantic-overlay;
+    out property <color> semantic-warning: Palette.semantic-warning;
+    out property <color> semantic-danger: Palette.semantic-danger;
+    out property <color> net-up: Palette.net-up;
+    out property <color> net-down: Palette.net-down;
+    out property <color> primary-subtle: primary.with-alpha(0.35);
+    out property <color> hover: dark ? Palette.hover-dark : Palette.hover-light;
+    out property <color> scroll: dark ? Palette.scroll-dark : Palette.scroll-light;
+    out property <color> scroll-focus: dark ? Palette.scroll-focus-dark : Palette.scroll-focus-light;
+
+    // 圆角尺度
+    out property <length> rounded-xs: 4px;
+    out property <length> rounded-sm: 6px;
+    out property <length> rounded-md: 8px;
+    out property <length> rounded-lg: 12px;
+    out property <length> rounded-xl: 16px;
+    out property <length> rounded-xxl: 24px;
+    out property <length> rounded-pill: 9999px;
+    out property <length> rounded-full: 9999px;
+
+    // 间距
+    out property <length> spacing-xxs: 4px;
+    out property <length> spacing-xs: 8px;
+    out property <length> spacing-sm: 12px;
+    out property <length> spacing-md: 16px;
+    out property <length> spacing-lg: 24px;
+    out property <length> spacing-xl: 32px;
+    out property <length> spacing-xxl: 48px;
+    out property <length> spacing-section: 96px;
+
+    // Button 组件尺寸
+    out property <length> button-xs: 24px;
+    out property <length> button-sm: 28px;
+    out property <length> button-md: 34px;
+    out property <length> button-lg: 38px;
+    out property <length> button-xl: 44px;
+
+    // 字号、字重
+    out property <length> typography-display-xl: 80px;
+    out property <length> typography-display-lg: 56px;
+    out property <length> typography-display-md: 40px;
+    out property <length> typography-headline: 28px;
+    out property <length> typography-card-title: 22px;
+    out property <length> typography-subhead: 20px;
+    out property <length> typography-body-lg: 18px;
+    out property <length> typography-body: 16px;
+    out property <length> typography-body-sm: 14px;
+    out property <length> typography-caption: 12px;
+    out property <length> typography-button: 14px;
+    out property <length> typography-eyebrow: 13px;
+    out property <length> typography-mono: 13px;
+    out property <int> typography-weight-regular: 400;
+    out property <int> typography-weight-medium: 500;
+    out property <int> typography-weight-semibold: 600;
+
+    // 通用交互与层级语义
+    out property <duration> duration-click: 50ms;
+    out property <easing> easing-click: linear;
+    out property <duration> duration-hover: 150ms;
+    out property <easing> easing-hover: linear;
+    out property <duration> duration-rotate: 200ms;
+    out property <easing> easing-rotate: ease-in-out;
+    out property <duration> duration-fade: 250ms;
+    out property <easing> easing-fade: ease-out;
+    out property <length> shadow-blur: 8px;
+    out property <length> shadow-offset-y: 2px;
+    out property <color> shadow-color: rgba(0, 0, 0, 0.35);
+    out property <length> border-width: 1px;
+    out property <float> disabled-opacity: 0.5;
+}

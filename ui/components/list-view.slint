@@ -1,0 +1,137 @@
+import { Theme } from "../theme.slint";
+
+component ScrollBar inherits Rectangle {
+    in property <length> value;
+    in property <length> maximum;
+    in property <length> page-size;
+    in property <bool> enabled: true;
+    callback scroll-to(length);
+
+    visible: root.maximum > 0px;
+    clip: true;
+    background: transparent;
+
+    scroll-touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: root.enabled ? pointer : default;
+        property <{ pressed-value: length, maximum: length, mouse-x: length, mouse-y: length }> saved-values;
+
+        function save-pointer-position() {
+            self.saved-values = {
+                pressed-value: -root.value,
+                maximum: root.maximum,
+                mouse-x: self.mouse-x,
+                mouse-y: self.mouse-y,
+            };
+        }
+
+        pointer-event(event) => {
+            if (root.enabled
+                && event.button == PointerEventButton.left
+                && event.kind == PointerEventKind.down) {
+                self.save-pointer-position();
+            }
+        }
+
+        moved => {
+            if (root.enabled && self.pressed) {
+                if (self.saved-values.maximum != root.maximum) {
+                    self.save-pointer-position();
+                }
+                root.scroll-to(-max(0px, min(root.maximum,
+                    self.saved-values.pressed-value
+                    + (self.mouse-y - self.saved-values.mouse-y)
+                    * root.maximum / max(1px, parent.height - handle.height))));
+            }
+        }
+
+        scroll-event(event) => {
+            if (root.enabled && event.delta-y != 0px) {
+                root.scroll-to(max(-root.maximum, min(0px, root.value + event.delta-y)));
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    handle := Rectangle {
+        x: 0px;
+        width: parent.width;
+        height: root.maximum <= 0px ? 0px
+            : max(min(24px, parent.height),
+                parent.height * root.page-size / (root.maximum + root.page-size));
+        y: root.maximum <= 0px ? 0px
+            : (parent.height - self.height) * (-root.value / root.maximum);
+        background: scroll-touch.has-hover || scroll-touch.pressed
+            ? Theme.scroll-focus : Theme.scroll;
+        border-radius: 3px;
+
+        animate background {
+            duration: Theme.duration-hover;
+            easing: Theme.easing-hover;
+        }
+    }
+}
+
+export component ScrollView inherits Rectangle {
+    in property <bool> enabled: true;
+    out property <length> visible-width <=> flickable.width;
+    out property <length> visible-height <=> flickable.height;
+    in-out property <length> viewport-width <=> flickable.viewport-width;
+    in-out property <length> viewport-height <=> flickable.viewport-height;
+    in-out property <length> viewport-y <=> flickable.viewport-y;
+    callback scrolled <=> flickable.flicked;
+
+    clip: true;
+    background: transparent;
+
+    flickable := Flickable {
+        interactive: false;
+        @children
+    }
+
+    vertical-bar := ScrollBar {
+        x: parent.width - 8px;
+        y: 4px;
+        width: 6px;
+        height: max(0px, parent.height - 8px);
+        enabled: root.enabled;
+        maximum: max(0px, flickable.viewport-height - flickable.height);
+        page-size: flickable.height;
+        value: flickable.viewport-y;
+        scroll-to(value) => {
+            flickable.viewport-y = value;
+            root.scrolled();
+        }
+    }
+}
+
+export component ListView inherits ScrollView {
+    in property <bool> auto-scroll: false;
+    in property <int> scroll-revision: 0;
+
+    function scroll-to-end() {
+        root.viewport-y = min(0px, root.visible-height - root.viewport-height);
+    }
+
+    changed viewport-height => {
+        if (root.auto-scroll) {
+            root.scroll-to-end();
+        }
+    }
+
+    changed scroll-revision => {
+        if (root.auto-scroll) {
+            root.scroll-to-end();
+        }
+    }
+
+    changed auto-scroll => {
+        if (root.auto-scroll) {
+            root.scroll-to-end();
+        }
+    }
+
+    @children
+}

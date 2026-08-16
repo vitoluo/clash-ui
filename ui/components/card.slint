@@ -1,0 +1,79 @@
+// 改造自 slintcn card 源码，按本项目规范重写。
+// 配色全部绑定项目 Theme，确保深浅主题同步切换。
+
+import { Theme } from "../theme.slint";
+
+export enum CardVariant { solid, glass, glass-interactive, raised }
+export enum CardSize { sm, default }
+export enum CardPadding { none, sm, md, lg }
+export enum CardRadius { md, lg, xl, xxl }
+
+export component Card inherits Rectangle {
+    in property <CardVariant> variant: CardVariant.solid;
+    in property <CardSize> size: CardSize.default;
+    in property <CardPadding> card-padding: CardPadding.lg;
+    in property <CardRadius> card-radius: CardRadius.lg;
+    out property <bool> hovered <=> touch.has-hover;
+
+    background: variant == CardVariant.glass || variant == CardVariant.glass-interactive
+        ? (variant == CardVariant.glass-interactive && hovered
+        ? Theme.hover : Theme.surface-2)
+        : Theme.surface-1;
+    border-color: variant == CardVariant.glass-interactive && hovered
+        ? Theme.hairline-strong : Theme.hairline;
+    border-width: Theme.border-width;
+    border-radius: card-radius == CardRadius.md ? Theme.rounded-md :
+        card-radius == CardRadius.lg ? Theme.rounded-lg :
+        card-radius == CardRadius.xxl ? Theme.rounded-xxl : Theme.rounded-xl;
+    drop-shadow-blur: variant == CardVariant.glass || variant == CardVariant.glass-interactive
+        ? Theme.shadow-blur
+        : variant == CardVariant.raised ? Theme.shadow-blur : 0px;
+    drop-shadow-offset-y: variant == CardVariant.glass || variant == CardVariant.glass-interactive
+        ? Theme.shadow-offset-y
+        : variant == CardVariant.raised ? Theme.shadow-offset-y : 0px;
+    drop-shadow-color: variant == CardVariant.solid ? transparent : Theme.shadow-color;
+
+    animate background, border-color {
+        duration: Theme.duration-hover;
+        easing: Theme.easing-hover;
+    }
+
+    out property <length> padding-l:
+        card-padding == CardPadding.none ? 0px :
+        card-padding == CardPadding.sm ? Theme.spacing-sm :
+        card-padding == CardPadding.md ? Theme.spacing-md : Theme.spacing-lg;
+    out property <length> gap-l:
+        size == CardSize.sm ? Theme.spacing-sm : Theme.spacing-md;
+
+    touch := TouchArea { }
+
+    @children
+}
+
+export component CardTitle inherits Text {
+    color: Theme.ink;
+    font-size: Theme.typography-card-title;
+    font-weight: Theme.typography-weight-semibold;
+}
+
+export component CardDescription inherits Text {
+    color: Theme.ink-subtle;
+    font-size: Theme.typography-body-sm;
+    wrap: word-wrap;
+}
+
+export component CardHeader inherits VerticalLayout {
+    spacing: Theme.spacing-xxs;
+    @children
+}
+
+export component CardContent inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    @children
+}
+
+export component CardFooter inherits HorizontalLayout {
+    alignment: end;
+    spacing: Theme.spacing-xs;
+    @children
+}

@@ -1,0 +1,223 @@
+import { Theme } from "../theme.slint";
+import { Button, ButtonSize, ButtonVariant } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
+import { Input } from "../components/input.slint";
+import { ListView } from "../components/list-view.slint";
+import {
+    Table,
+    TableBodyRow,
+    TableRow as ConnectionRow,
+} from "../components/table.slint";
+import { Tabs, TabItem, TabsVariant } from "../components/tabs.slint";
+import { Toaster, ToastVariant } from "../components/toast.slint";
+import { IconDisplay, IconSet } from "@lucide";
+
+export { ConnectionRow }
+export struct ConnectionDetailRow {
+    label: string,
+    value: string,
+}
+
+export global ConnectionsModel {
+    in-out property <[ConnectionRow]> rows: [];
+    in-out property <[ConnectionDetailRow]> detail-rows: [];
+    in-out property <int> tab: 0;
+    in-out property <string> query: "";
+    in-out property <int> sort-column: -1;
+    in-out property <int> sort-direction: 0;
+    in-out property <bool> loading: false;
+    in-out property <bool> busy: false;
+    in-out property <string> error: "";
+    in-out property <bool> detail-open: false;
+    in-out property <string> detail-title: "连接详情";
+    in-out property <bool> toast-visible: false;
+    in-out property <string> toast-message: "";
+    in-out property <int> toast-variant: 0;
+
+    callback select-tab(int);
+    callback search-changed(string);
+    callback header-clicked(int);
+    callback row-clicked(string);
+    callback row-action(string);
+    callback close-all();
+    callback clear-history();
+    callback close-detail();
+}
+
+export component ConnectionsPage inherits Rectangle {
+    VerticalLayout {
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-md;
+        padding-top: Theme.spacing-sm;
+        padding-bottom: Theme.spacing-md;
+        spacing: Theme.spacing-xs;
+
+        HorizontalLayout {
+            tabs := Tabs {
+                horizontal-stretch: 0;
+                variant: TabsVariant.line;
+                items: [{ label: "活动中" }, { label: "已关闭" }];
+                current <=> ConnectionsModel.tab;
+                changed(index) => { ConnectionsModel.select-tab(index); }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.spacing-xs;
+
+            search-box := Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.surface-2;
+                border-width: Theme.border-width;
+                border-color: Theme.hairline;
+                border-radius: Theme.rounded-md;
+
+                IconDisplay {
+                    x: Theme.spacing-sm;
+                    y: (parent.height - self.height) / 2;
+                    icon: IconSet.Search;
+                    size: Theme.typography-body;
+                    stroke: Theme.ink-subtle;
+                }
+
+                Input {
+                    x: 32px;
+                    width: parent.width - 32px;
+                    background: transparent;
+                    border-width: 0px;
+                    text <=> ConnectionsModel.query;
+                    placeholder: "搜索主机或规则";
+                    edited => { ConnectionsModel.search-changed(self.text); }
+                }
+            }
+
+            if ConnectionsModel.tab == 0: Button {
+                is-icon: true;
+                variant: ButtonVariant.ghost;
+                tips: "关闭所有连接";
+                disabled: ConnectionsModel.busy;
+                clicked => { ConnectionsModel.close-all(); }
+                IconDisplay {
+                    icon: IconSet.X;
+                    size: Theme.typography-body;
+                    stroke: Theme.ink-subtle;
+                }
+            }
+            if ConnectionsModel.tab == 1: Button {
+                is-icon: true;
+                variant: ButtonVariant.ghost;
+                tips: "清空历史记录";
+                disabled: ConnectionsModel.busy;
+                clicked => { ConnectionsModel.clear-history(); }
+                IconDisplay {
+                    icon: IconSet.Trash2;
+                    size: Theme.typography-body;
+                    stroke: Theme.ink-subtle;
+                }
+            }
+        }
+
+        table-area := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+
+            table := Table {
+                width: parent.width;
+                height: parent.height;
+                columns: ["主机", "下载速度", "上传速度", "下载量", "上传量", ""];
+                column-width-ratios: [0.34, 0.14, 0.14, 0.14, 0.14, 0.10];
+                sortable: true;
+                sort-column: ConnectionsModel.sort-column;
+                sort-direction: ConnectionsModel.sort-direction;
+                header-clicked(index) => { ConnectionsModel.header-clicked(index); }
+
+                ListView {
+                    for item[index] in ConnectionsModel.rows: body-row := TableBodyRow {
+                        data: item;
+                        column-width-ratios: table.column-width-ratios;
+                        show-secondary: true;
+                        show-divider: index < ConnectionsModel.rows.length - 1;
+                        clicked(id) => { ConnectionsModel.row-clicked(id); }
+
+                        HorizontalLayout {
+                            width: body-row.content-width * parent.column-width-ratios[5];
+                            alignment: center;
+                            cross-axis-alignment: center;
+
+                            Button {
+                                is-icon: true;
+                                variant: ButtonVariant.ghost;
+                                tips: "关闭连接";
+                                disabled: ConnectionsModel.busy;
+                                clicked => { ConnectionsModel.row-action(item.id); }
+                                IconDisplay {
+                                    icon: IconSet.X;
+                                    size: Theme.typography-body-sm;
+                                    stroke: Theme.ink-subtle;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if ConnectionsModel.error != "": Text {
+                text: ConnectionsModel.error;
+                color: Theme.semantic-danger;
+                font-size: Theme.typography-caption;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if !ConnectionsModel.loading && ConnectionsModel.error == ""
+                && ConnectionsModel.rows.length == 0: Text {
+                text: "暂无连接";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-body-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    Dialog {
+        open <=> ConnectionsModel.detail-open;
+        title: ConnectionsModel.detail-title;
+        close-label: "关闭";
+        dismissed => { ConnectionsModel.close-detail(); }
+
+        ListView {
+            height: 360px;
+            for item in ConnectionsModel.detail-rows: VerticalLayout {
+                spacing: Theme.spacing-xxs;
+                padding-bottom: Theme.spacing-sm;
+
+                Text {
+                    text: item.label;
+                    color: Theme.ink-subtle;
+                    font-size: Theme.typography-caption;
+                }
+
+                Text {
+                    width: parent.width;
+                    text: item.value;
+                    color: Theme.ink;
+                    font-size: Theme.typography-mono;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    Toaster {
+        width: root.width;
+        height: root.height;
+        shown <=> ConnectionsModel.toast-visible;
+        text: ConnectionsModel.toast-message;
+        variant: ConnectionsModel.toast-variant == 1 ? ToastVariant.success
+            : (ConnectionsModel.toast-variant == 2 ? ToastVariant.error : ToastVariant.default);
+    }
+}

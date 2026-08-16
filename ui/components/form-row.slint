@@ -1,0 +1,26 @@
+import { Theme } from "../theme.slint";
+import { Separator } from "separator.slint";
+
+export component FormRow inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> need-separator: true;
+
+    in-out property <length> form-height: Theme.button-md;
+
+    HorizontalLayout {
+        height: form-height + 2 * Theme.spacing-sm;
+        padding: Theme.spacing-sm;
+        spacing: Theme.spacing-sm;
+        alignment: space-between;
+        cross-axis-alignment: center;
+        Text {
+            text: root.label;
+            color: Theme.ink;
+            font-size: Theme.typography-body-sm;
+        }
+
+        @children
+    }
+
+    Separator { }
+}

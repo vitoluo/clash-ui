@@ -1,0 +1,123 @@
+// 改造自 slintcn dropdown-menu 源码，仅按项目主题规范适配样式。
+
+import { Theme } from "../theme.slint";
+
+export struct DropdownMenuItem {label: string}
+
+export component DropdownMenu inherits Rectangle {
+    // 点击触发器后显示的菜单项。
+    in property <[DropdownMenuItem]> items;
+    // 弹出菜单的宽度。
+    in property <length> content-width: 200px;
+    // 弹出菜单内由方向键高亮的行。
+    in-out property <int> highlighted-index: -1;
+    // 选择菜单项时回传对应索引。
+    callback selected(int);
+
+    background: transparent;
+
+    preferred-width: trigger.preferred-width;
+    preferred-height: trigger.preferred-height;
+
+    public function open-dropdown() {
+        popup.show();
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { popup.show(); }
+    }
+
+    trigger := HorizontalLayout {
+        @children
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + 6px;
+        width: root.content-width;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.surface-1;
+            border-color: Theme.hairline;
+            border-width: Theme.border-width;
+            border-radius: Theme.rounded-md;
+            drop-shadow-blur: Theme.shadow-blur;
+            drop-shadow-offset-y: Theme.shadow-offset-y;
+            drop-shadow-color: Theme.shadow-color;
+            height: menu.preferred-height;
+            // 弹窗打开后将焦点交给键盘处理域。
+            forward-focus: popup-focus;
+
+            popup-focus := FocusScope {
+                width: 0;
+                height: 0;
+                key-pressed(event) => {
+                    if (event.text == "\u{1b}") { popup.close(); return accept; }
+                    if (event.text == "\n") {
+                        if (root.items.length > 0) {
+                            root.selected(root.highlighted-index);
+                            popup.close();
+                        }
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        if (root.items.length > 0) {
+                            root.highlighted-index = mod(root.highlighted-index + 1, root.items.length);
+                        }
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        if (root.items.length > 0) {
+                            if (root.highlighted-index < 0) {
+                                root.highlighted-index = root.items.length - 1;
+                            } else {
+                                root.highlighted-index = mod(root.highlighted-index + root.items.length - 1, root.items.length);
+                            }
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+
+            menu := VerticalLayout {
+                padding: Theme.spacing-xxs;
+                spacing: 0px;
+                for item[idx] in root.items: Rectangle {
+                    height: 30px;
+                    border-radius: Theme.rounded-sm;
+                    background: (item-touch.has-hover || idx == root.highlighted-index)
+                        ? Theme.hover : transparent;
+
+                    HorizontalLayout {
+                        padding-left: Theme.spacing-xs;
+                        padding-right: Theme.spacing-xs;
+                        Text {
+                            text: item.label;
+                            color: (item-touch.has-hover || idx == root.highlighted-index) ?
+                                Theme.ink-muted : Theme.ink-subtle;
+                            font-size: Theme.typography-body-sm;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    item-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.selected(idx);
+                            popup.close();
+                        }
+                    }
+
+                    animate background {
+                        duration: Theme.duration-hover;
+                        easing: Theme.easing-hover;
+                    }
+                }
+            }
+        }
+    }
+}

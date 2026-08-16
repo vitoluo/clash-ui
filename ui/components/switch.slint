@@ -1,0 +1,111 @@
+// 改造自 slintcn switch 源码，按本项目规范重写。
+// 配色由 Tokens.* 改为 Theme.*（强调色 Theme.primary），交互逻辑/属性/回调不变。
+
+import { Theme } from "../theme.slint";
+import { FocusRing } from "focus-ring.slint";
+
+// 双态开关：36×20 轨道，16×16 滑块在关（左）/开（右）之间滑动。
+export component Switch {
+    // 双向开关状态。
+    in-out property <bool> checked: false;
+    // 轨道右侧文字。
+    in property <string> label;
+    // 禁用时变暗且无响应。
+    in property <bool> disabled: false;
+    // 状态切换时触发，携带新 checked 值。
+    callback toggled(bool);
+    // 指针按下产生的焦点（仅键盘显示聚焦环）。
+    property <bool> pointer-focus: false;
+    property <length> track-width: 36px;
+    property <length> track-height: 20px;
+    property <length> knob-size: 16px;
+    property <length> track-inset: 2px;
+
+    preferred-width: content.preferred-width;
+    preferred-height: content.preferred-height;
+
+    content := HorizontalLayout {
+        spacing: Theme.spacing-xs;
+        alignment: start;
+
+        track := Rectangle {
+            width: root.track-width;
+            height: root.track-height;
+            background: root.checked ? Theme.primary : Theme.surface-2;
+            border-color: root.checked ? Theme.primary : Theme.hairline-strong;
+            border-width: Theme.border-width;
+            // Slint 不会像 CSS 那样自动裁剪超大的圆角值；半高才能保持药丸轨道。
+            border-radius: root.track-height / 2;
+
+            knob := Rectangle {
+                width: root.knob-size;
+                height: root.knob-size;
+                y: (parent.height - self.height) / 2;
+                x: root.checked ? parent.width - self.width - root.track-inset : root.track-inset;
+                background: root.checked ? Theme.on-primary : Theme.ink;
+                border-radius: root.knob-size / 2;
+
+                animate x, background {
+                    duration: Theme.duration-hover;
+                    easing: Theme.easing-hover;
+                }
+            }
+
+            if focus-scope.has-focus && !root.pointer-focus: FocusRing {
+                radius: root.track-height / 2 + Theme.border-width;
+                host-width: parent.width;
+                host-height: parent.height;
+            }
+
+            animate background, border-color {
+                duration: Theme.duration-hover;
+                easing: Theme.easing-hover;
+            }
+        }
+
+        if root.label != "": Text {
+            text: root.label;
+            color: root.disabled ? Theme.ink-subtle : Theme.ink;
+            font-size: Theme.typography-body-sm;
+            vertical-alignment: center;
+        }
+    }
+
+    opacity: root.disabled ? Theme.disabled-opacity : 1.0;
+
+    TouchArea {
+        mouse-cursor: root.disabled ? default : pointer;
+        pointer-event(ev) => {
+            if (!root.disabled
+                && ev.button == PointerEventButton.left
+                && ev.kind == PointerEventKind.down) {
+                root.pointer-focus = true;
+            }
+        }
+        clicked => {
+            if (!root.disabled) {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+                focus-scope.focus();
+            }
+        }
+    }
+
+    forward-focus: focus-scope;
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            root.pointer-focus = false;
+            if (event.text == " " || event.text == "\n") {
+                if (!root.disabled) {
+                    root.checked = !root.checked;
+                    root.toggled(root.checked);
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+}

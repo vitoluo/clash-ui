@@ -1,0 +1,116 @@
+import { Tokens } from "../theme/tokens.slint";
+
+// Click-triggered menu. The trigger is `@children` (typically a Button);
+// clicking it opens a PopupWindow with `items`, each firing `selected(index)`.
+// Anchored below the trigger; closes on click outside.
+export struct DropdownMenuItem { label: string }
+
+export component DropdownMenu inherits Rectangle {
+    // Menu rows shown when the trigger is clicked.
+    in property <[DropdownMenuItem]> items;
+    // Pixel width of the popup panel.
+    in property <length> content-width: 200px;
+    // Row highlighted by ↑/↓ inside the open popup; consumers rarely set this.
+    in-out property <int> highlighted-index: 0;
+    // Fired with the chosen row's index; the popup auto-closes.
+    callback selected(int);
+
+    background: transparent;
+
+    // Expose the trigger's size so a parent layout allocates real space
+    // (otherwise the slot collapses to 0 and the trigger overlaps siblings).
+    preferred-width:  trigger.preferred-width;
+    preferred-height: trigger.preferred-height;
+
+    trigger := HorizontalLayout {
+        @children
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { popup.show(); }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 6px;
+        width: root.content-width;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Tokens.color-card;
+            border-color: Tokens.color-border-hairline;
+            border-width: 1px;
+            border-radius: Tokens.radius-md;
+            drop-shadow-blur:     Tokens.shadow-e2-blur;
+            drop-shadow-offset-y: Tokens.shadow-e2-offset-y;
+            drop-shadow-color:    Tokens.shadow-e2-color;
+            height: menu.preferred-height;
+            // Forward focus to the FocusScope so arrow-key + Esc handlers fire
+            // as soon as the popup opens.
+            forward-focus: popup-focus;
+
+            popup-focus := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == "\u{1b}") { popup.close(); return accept; }
+                    if (event.text == "\n") {
+                        if (root.items.length > 0) {
+                            root.selected(root.highlighted-index);
+                            popup.close();
+                        }
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        if (root.items.length > 0) {
+                            root.highlighted-index = mod(root.highlighted-index + 1, root.items.length);
+                        }
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        if (root.items.length > 0) {
+                            root.highlighted-index = mod(root.highlighted-index + root.items.length - 1, root.items.length);
+                        }
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+
+            menu := VerticalLayout {
+                padding: 4px;
+                spacing: 0;
+                for item[idx] in root.items: Rectangle {
+                    height: 30px;
+                    border-radius: Tokens.radius-sm;
+                    background: (item-touch.has-hover || idx == root.highlighted-index)
+                        ? Tokens.color-surface-1 : transparent;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        Text {
+                            text: item.label;
+                            color: Tokens.color-foreground;
+                            font-size: Tokens.typography-body-size;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    item-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.selected(idx);
+                            popup.close();
+                        }
+                    }
+
+                    animate background {
+                        duration: Tokens.motion-fast;
+                        easing: Tokens.motion-easing-standard;
+                    }
+                }
+            }
+        }
+    }
+}

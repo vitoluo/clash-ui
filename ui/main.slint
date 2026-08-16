@@ -1,0 +1,150 @@
+// 应用主窗口：自定义标题栏 + 左导航 + 右内容区 + 八向边缘缩放手柄。
+// 窗口尺寸由 Rust 按屏幕 1/4 逻辑像素设置（见 src/main.rs），此处不固定。
+
+import { Theme } from "theme.slint";
+import { SpeedStats } from "speed-stats.slint";
+import { AppState } from "app.slint";
+import { TitleBar } from "components/title-bar.slint";
+import { Separator } from "components/separator.slint";
+import { Sidebar, SidebarItem } from "components/sidebar.slint";
+import { IconSet } from "@lucide";
+import { ResizeHandles } from "components/resize-handles.slint";
+import { Dialog } from "components/dialog.slint";
+import { Button, ButtonVariant } from "components/button.slint";
+import { HomePage } from "pages/home.slint";
+import { ProxyPage } from "pages/proxy.slint";
+import { RulesPage } from "pages/rules.slint";
+import { ConfigPage } from "pages/config.slint";
+import { OverridePage } from "pages/override.slint";
+import { ConnectionsPage } from "pages/connections.slint";
+import { LogsPage } from "pages/logs.slint";
+import { SettingsPage } from "pages/settings.slint";
+export { SpeedModel }from "speed-stats.slint";
+export { Theme }from "theme.slint";
+export { AppState }from "app.slint";
+export { HomeModel }from "pages/home.slint";
+export { ProxyModel }from "pages/proxy.slint";
+export { RulesModel }from "pages/rules.slint";
+export { ConnectionsModel }from "pages/connections.slint";
+export { ConnectionRow, ConnectionDetailRow }from "pages/connections.slint";
+export { LogsModel, LogRow }from "pages/logs.slint";
+export { TableRow }from "components/table.slint";
+export { ConfigModel, ConfigRow }from "pages/config.slint";
+export { OverrideModel, OverrideRow }from "pages/override.slint";
+export { SettingsModel, UwpRow }from "pages/settings.slint";
+
+export component MainWindow inherits Window {
+    property <length> navigation-width: 200px;
+    property <length> speed-stats-height: 120px;
+
+    title: "Clash UI";
+    min-width: 900px;
+    min-height: 600px;
+    no-frame: true;
+    // 窗口图标由 assets/app.png 编译时内嵌。
+    icon: @image-url("../assets/app.png");
+    background: transparent;
+
+    property <length> frame-inset: root.maximized ? 0px : Theme.shadow-blur;
+
+    // 窗口控制回调（由 Rust 接线；关闭=最小化到托盘，不退出应用）
+    callback start-drag();
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+    callback start-resize(int);
+
+    property <[SidebarItem]> navigation-items: [
+        { label: "主页", page: 0, icon: IconSet.House },
+        { label: "代理", page: 1, icon: IconSet.Globe },
+        { label: "规则", page: 2, icon: IconSet.List },
+        { label: "配置", page: 3, icon: IconSet.FileText },
+        { label: "覆写", page: 4, icon: IconSet.FileCog },
+        { label: "连接", page: 5, icon: IconSet.Activity },
+        { label: "日志", page: 6, icon: IconSet.ScrollText },
+        { label: "设置", page: 7, icon: IconSet.Settings },
+    ];
+
+    Rectangle {
+        x: root.frame-inset;
+        y: root.frame-inset;
+        width: root.width - root.frame-inset * 2;
+        height: root.height - root.frame-inset * 2;
+        border-radius: root.maximized ? 0px : Theme.rounded-md;
+        drop-shadow-blur: root.maximized ? 0px : Theme.shadow-blur;
+        drop-shadow-offset-y: root.maximized ? 0px : Theme.shadow-offset-y;
+        drop-shadow-color: root.maximized ? transparent : Theme.shadow-color;
+        background: Theme.surface-1;
+        clip: true;
+
+        VerticalLayout {
+            title-bar := TitleBar {
+                start-drag => { root.start-drag(); }
+                minimize => { root.minimize(); }
+                toggle-maximize => { root.toggle-maximize(); }
+                close-window => { root.close-window(); }
+            }
+
+            HorizontalLayout {
+                height: parent.height - title-bar.height;
+                VerticalLayout {
+                    width: root.navigation-width;
+                    padding: Theme.spacing-xs;
+                    Sidebar {
+                        height: parent.height - 1px - root.speed-stats-height - 2 * Theme.spacing-xs;
+                        items: root.navigation-items;
+                        active-page: AppState.current-page;
+                        navigate(page) => { AppState.navigate(page); }
+                    }
+
+                    Separator { }
+
+                    SpeedStats { }
+                }
+
+                Rectangle {
+                    background: Theme.canvas;
+                    border-top-left-radius: Theme.rounded-md;
+
+                    if AppState.current-page == 0: HomePage { }
+                    if AppState.current-page == 1: ProxyPage { }
+                    if AppState.current-page == 2: RulesPage { }
+                    if AppState.current-page == 3: ConfigPage { }
+                    if AppState.current-page == 4: OverridePage { }
+                    if AppState.current-page == 5: ConnectionsPage { }
+                    if AppState.current-page == 6: LogsPage { }
+                    if AppState.current-page == 7: SettingsPage { }
+                }
+            }
+        }
+
+        // 八向边缘缩放手柄（覆盖于内容之上）
+        ResizeHandles {
+            start-resize(dir) => { root.start-resize(dir); }
+        }
+
+        Dialog {
+            width: root.width;
+            height: root.height;
+            open: AppState.tun-confirm-open;
+            title: "需要管理员权限";
+            description: "开启 TUN 代理需要管理员权限，确认后将重启软件。";
+            dismissed => { AppState.cancel-tun-enable(); }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing-xs;
+                Button {
+                    text: "取消";
+                    variant: ButtonVariant.ghost;
+                    clicked => { AppState.cancel-tun-enable(); }
+                }
+
+                Button {
+                    text: "确认并重启";
+                    clicked => { AppState.confirm-tun-enable(); }
+                }
+            }
+        }
+    }
+}

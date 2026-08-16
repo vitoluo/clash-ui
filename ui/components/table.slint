@@ -1,0 +1,165 @@
+// 基于 slintcn table 源码，按项目 Theme 和规则页布局要求适配。
+
+import { Theme } from "../theme.slint";
+import { ListView } from "list-view.slint";
+import { IconDisplay, IconSet } from "@lucide";
+import { Separator } from "separator.slint";
+
+export struct TableRow {
+    id: string,
+    cells: [string],
+    secondary-cells: [string],
+}
+
+export component TableBodyRow inherits VerticalLayout {
+    in property <TableRow> data;
+    in property <[float]> column-width-ratios: [0.34, 0.33, 0.33];
+    in property <bool> show-secondary: false;
+    in property <bool> show-divider: false;
+    callback clicked(string);
+    property <length> row-height: 40px;
+    property <length> cell-padding: Theme.spacing-sm;
+    out property <length> content-width: root.width - 2 * root.cell-padding;
+
+    height: row-container.height + (root.show-divider ? 1px : 0px);
+    spacing: 0px;
+
+    row-container := Rectangle {
+        height: root.show-secondary && root.data.secondary-cells.length > 0
+            ? root.row-height + 18px : root.row-height;
+        background: row-touch.has-hover ? Theme.surface-1 : Theme.canvas;
+
+        row-touch := TouchArea {
+            mouse-cursor: root.data.id == "" ? default : pointer;
+            clicked => {
+                if (root.data.id != "") { root.clicked(root.data.id); }
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: root.cell-padding;
+            padding-right: root.cell-padding;
+            spacing: 0px;
+
+            for cell[cell-index] in root.data.cells: Rectangle {
+                width: root.content-width * root.column-width-ratios[cell-index];
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.spacing-xxs;
+
+                    cell-label := Text {
+                        text: cell;
+                        color: Theme.ink-subtle;
+                        font-size: Theme.typography-mono;
+                        vertical-alignment: center;
+                        overflow: elide;
+
+                        if self.preferred-width > self.width: Tooltip {
+                            text: @markdown("\{cell}");
+                        }
+                    }
+
+                    if root.show-secondary
+                        && root.data.secondary-cells.length > cell-index
+                        && root.data.secondary-cells[cell-index] != "": secondary-label := Text {
+                        text: root.data.secondary-cells[cell-index];
+                        color: Theme.ink-subtle;
+                        font-size: Theme.typography-caption;
+                        overflow: elide;
+
+                        if self.preferred-width > self.width: Tooltip {
+                            text: @markdown("\{root.data.secondary-cells[cell-index]}");
+                        }
+                    }
+                }
+            }
+
+            @children
+        }
+
+        animate background {
+            duration: Theme.duration-hover;
+            easing: Theme.easing-hover;
+        }
+    }
+
+    if root.show-divider: Separator { }
+}
+
+export component Table inherits Rectangle {
+    in property <[string]> columns;
+    in property <[float]> column-width-ratios: [0.34, 0.33, 0.33];
+    in property <bool> sortable: false;
+    in property <int> sort-column: -1;
+    in property <int> sort-direction: 0;
+    callback header-clicked(int);
+    property <length> header-height: 42px;
+    property <length> cell-padding: Theme.spacing-sm;
+    property <length> content-width: root.width - 2 * root.cell-padding;
+
+    background: transparent;
+
+    VerticalLayout {
+
+        Rectangle {
+            height: root.header-height;
+            background: Theme.surface-2;
+            border-top-left-radius: Theme.rounded-md;
+            border-top-right-radius: Theme.rounded-md;
+
+            HorizontalLayout {
+                padding-left: root.cell-padding;
+                padding-right: root.cell-padding;
+                spacing: 0px;
+
+                for col[index] in root.columns: Rectangle {
+                    width: root.content-width * root.column-width-ratios[index];
+
+                    if root.sortable: header-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.header-clicked(index); }
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-xxs;
+
+                        header-label := Text {
+                            text: col;
+                            color: Theme.ink;
+                            font-size: Theme.typography-caption;
+                            font-weight: Theme.typography-weight-semibold;
+                            vertical-alignment: center;
+                            overflow: elide;
+
+                            if self.preferred-width > self.width: Tooltip {
+                                text: @markdown("\{col}");
+                            }
+                        }
+
+                        if root.sortable && root.sort-column == index: VerticalLayout {
+                            alignment: center;
+                            IconDisplay {
+                                icon: root.sort-direction < 0 ? IconSet.ChevronUp : IconSet.ChevronDown;
+                                size: Theme.typography-body-sm;
+                                stroke: Theme.ink-subtle;
+                            }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Separator { }
+
+        list-viewport := Rectangle {
+            border-bottom-left-radius: Theme.rounded-md;
+            border-bottom-right-radius: Theme.rounded-md;
+
+            @children
+        }
+    }
+}

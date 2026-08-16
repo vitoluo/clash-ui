@@ -1,0 +1,125 @@
+// 基于 slintcn Tabs 源码适配项目主题，保留鼠标、键盘和焦点交互。
+
+import { Theme } from "../theme.slint";
+import { FocusRing } from "focus-ring.slint";
+
+export struct TabItem {label: string}
+
+export enum TabsVariant { default, line }
+
+export component Tabs inherits Rectangle {
+    in property <[TabItem]> items;
+    in-out property <int> current: 0;
+    in property <TabsVariant> variant: TabsVariant.default;
+    callback changed(int);
+
+    property <bool> segmented: variant == TabsVariant.default;
+    property <bool> pointer-focus: false;
+
+    background: segmented ? Theme.surface-2 : transparent;
+    border-radius: Theme.rounded-lg;
+    height: segmented ? Theme.button-lg : Theme.button-md + 2px;
+
+    forward-focus: nav;
+    nav := FocusScope {
+        // 使用零尺寸焦点域，避免首次鼠标点击被焦点域拦截。
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            root.pointer-focus = false;
+            if (event.text == Key.LeftArrow) {
+                if (root.items.length > 0) {
+                    root.current = mod(root.current + root.items.length - 1, root.items.length);
+                    root.changed(root.current);
+                }
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                if (root.items.length > 0) {
+                    root.current = mod(root.current + 1, root.items.length);
+                    root.changed(root.current);
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    HorizontalLayout {
+        padding: root.segmented ? Theme.spacing-xxs : 0px;
+        spacing: Theme.spacing-xxs;
+
+        for item[idx] in items: Rectangle {
+            property <bool> active: idx == root.current;
+
+            min-width: label-text.preferred-width + 2 * Theme.spacing-sm;
+
+            surface := Rectangle {
+                x: 0px;
+                y: touch.pressed ? 1px : 0px;
+                width: parent.width;
+                height: parent.height;
+                background: root.segmented
+                    ? (active
+                    ? Theme.surface-1
+                    : (touch.has-hover ? Theme.hover : transparent))
+                    : (touch.has-hover && !active ? Theme.hover : transparent);
+                border-radius: Theme.rounded-md;
+
+                drop-shadow-blur: root.segmented && active ? Theme.shadow-blur : 0px;
+                drop-shadow-offset-y: root.segmented && active ? Theme.shadow-offset-y : 0px;
+                drop-shadow-color: root.segmented && active ? Theme.shadow-color : transparent;
+
+                label-text := Text {
+                    x: (parent.width - self.preferred-width) / 2;
+                    y: (parent.height - self.preferred-height) / 2;
+                    text: item.label;
+                    color: active ? Theme.ink : Theme.ink-subtle;
+                    font-size: Theme.typography-button;
+                    font-weight: active
+                        ? Theme.typography-weight-semibold
+                        : Theme.typography-weight-medium;
+                }
+
+                if !root.segmented && active: Rectangle {
+                    x: Theme.spacing-sm;
+                    y: parent.height - 2px;
+                    width: max(0px, parent.width - 2 * Theme.spacing-sm);
+                    height: 2px;
+                    background: Theme.primary;
+                    border-radius: 1px;
+                }
+
+                animate background, drop-shadow-blur {
+                    duration: Theme.duration-hover;
+                    easing: Theme.easing-hover;
+                }
+                animate y {
+                    duration: Theme.duration-click;
+                    easing: Theme.easing-click;
+                }
+            }
+
+            touch := TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(ev) => {
+                    if (ev.button == PointerEventButton.left
+                        && ev.kind == PointerEventKind.down) {
+                        root.pointer-focus = true;
+                    }
+                }
+                clicked => {
+                    root.current = idx;
+                    root.changed(idx);
+                    nav.focus();
+                }
+            }
+        }
+    }
+
+    if nav.has-focus && !root.pointer-focus: FocusRing {
+        host-width: parent.width;
+        host-height: parent.height;
+        radius: Theme.rounded-lg;
+    }
+}

@@ -1,0 +1,81 @@
+// 改造自 slintcn input 源码；颜色与焦点样式按项目 Theme 重写。
+
+import { Theme } from "../theme.slint";
+import { FocusRing } from "focus-ring.slint";
+
+export component Input inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> enabled: true;
+    in property <bool> read-only: false;
+    in property <bool> password: false;
+    in property <bool> auto-focus: false;
+    callback edited(string);
+    callback accepted(string);
+
+    property <bool> pointer-focus: false;
+
+    forward-focus: field-scope;
+
+    height: Theme.button-md;
+    background: Theme.surface-2;
+    border-color: Theme.hairline;
+    border-width: Theme.border-width;
+    border-radius: Theme.rounded-md;
+    opacity: root.enabled ? 1.0 : Theme.disabled-opacity;
+
+    focus-area := TouchArea {
+        pointer-event(ev) => {
+            if (root.enabled
+                && ev.button == PointerEventButton.left
+                && ev.kind == PointerEventKind.down) {
+                root.pointer-focus = true;
+            }
+        }
+        clicked => { input.focus(); }
+    }
+
+    field-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        enabled: root.enabled;
+        forward-focus: input;
+        key-pressed(event) => {
+            root.pointer-focus = false;
+            return reject;
+        }
+    }
+
+    input := TextInput {
+        x: Theme.spacing-sm;
+        y: 0px;
+        width: parent.width - 2 * Theme.spacing-sm;
+        height: parent.height;
+        text <=> root.text;
+        color: Theme.ink;
+        font-size: Theme.typography-body-sm;
+        single-line: true;
+        read-only: root.read-only || !root.enabled;
+        input-type: root.password ? InputType.password : InputType.text;
+        vertical-alignment: center;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(self.text); }
+        init => { if (root.auto-focus) { self.focus(); } }
+    }
+
+    if root.text == "": Text {
+        x: input.x;
+        y: 0px;
+        width: input.width;
+        height: parent.height;
+        text: root.placeholder;
+        color: Theme.ink-subtle;
+        font-size: Theme.typography-body-sm;
+        vertical-alignment: center;
+    }
+
+    if input.has-focus && !root.pointer-focus: FocusRing {
+        host-width: parent.width;
+        host-height: parent.height;
+    }
+}

@@ -1,0 +1,70 @@
+// 改造自 slintcn toast 源码；保留 Toast/Toaster 语义并按项目 Theme 重写。
+
+import { Theme } from "../theme.slint";
+
+export enum ToastVariant { default, success, error }
+
+export component Toast inherits Rectangle {
+    in-out property <bool> shown: false;
+    in property <string> text;
+    in property <ToastVariant> variant: ToastVariant.default;
+    callback dismissed();
+    property <length> toast-min-width: 180px;
+    property <length> toast-height: 40px;
+    property <length> toast-padding: Theme.spacing-md;
+
+    width: toast-text.preferred-width + 2 * root.toast-padding;
+    min-width: root.toast-min-width;
+    height: root.toast-height;
+    visible: root.shown;
+    background: root.variant == ToastVariant.success
+        ? Theme.semantic-success :
+        root.variant == ToastVariant.error
+        ? Theme.semantic-danger : Theme.surface-2;
+    border-width: Theme.border-width;
+    border-color: root.variant == ToastVariant.default ? Theme.hairline-strong : root.background;
+    border-radius: Theme.rounded-md;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-offset-y: Theme.shadow-offset-y;
+    drop-shadow-color: Theme.shadow-color;
+
+    toast-text := Text {
+        x: root.toast-padding;
+        y: (parent.height - self.preferred-height) / 2;
+        text: root.text;
+        color: root.variant == ToastVariant.default ? Theme.ink : Theme.on-primary;
+        font-size: Theme.typography-body-sm;
+        font-weight: Theme.typography-weight-medium;
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.shown = false;
+            root.dismissed();
+        }
+    }
+}
+
+export component Toaster inherits Rectangle {
+    in-out property <bool> shown: false;
+    in property <string> text;
+    in property <ToastVariant> variant: ToastVariant.default;
+    background: transparent;
+
+    Toast {
+        x: root.width - self.width - Theme.spacing-md;
+        y: root.height - self.height - Theme.spacing-md;
+        shown <=> root.shown;
+        text: root.text;
+        variant: root.variant;
+    }
+
+    hide-timer := Timer {
+        interval: 1s;
+        running: root.shown;
+        triggered => {
+            root.shown = false;
+        }
+    }
+}
