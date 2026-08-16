@@ -123,9 +123,9 @@ jobs:
           $mihomoArchive = Join-Path $env:RUNNER_TEMP $mihomoAsset
           Invoke-WebRequest -Headers $headers -Uri "https://github.com/MetaCubeX/mihomo/releases/download/$($mihomo.tag_name)/$mihomoAsset" -OutFile $mihomoArchive
           Expand-Archive -LiteralPath $mihomoArchive -DestinationPath $coreExtract -Force
-          $mihomoBinary = Get-ChildItem -LiteralPath $coreExtract -Recurse -File -Filter "mihomo.exe" | Select-Object -First 1
+          $mihomoBinary = Get-ChildItem -LiteralPath $coreExtract -Recurse -File -Filter "mihomo*.exe" | Select-Object -First 1
           if ($null -eq $mihomoBinary) {
-            throw "mihomo 压缩包内未找到 mihomo.exe"
+            throw "mihomo 压缩包内未找到 mihomo*.exe"
           }
           Copy-Item $mihomoBinary.FullName (Join-Path $resources "clash.exe")
 
