@@ -198,7 +198,7 @@ pub fn start_recorder(mut receiver: broadcast::Receiver<LogLine>) -> LogsRecorde
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    eprintln!("日志记录器跳过 {skipped} 条过期消息");
+                    crate::log::error(format_args!("日志记录器跳过 {skipped} 条过期消息"));
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -359,7 +359,7 @@ impl LogsViewState {
 
     pub fn append_line(&mut self, line: LogLine) -> bool {
         let Some(level) = LogLevel::parse(&line.level) else {
-            eprintln!("忽略未知日志级别: {}", line.level);
+            crate::log::error(format_args!("忽略未知日志级别: {}", line.level));
             return false;
         };
 

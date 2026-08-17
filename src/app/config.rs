@@ -249,19 +249,19 @@ fn load(root: &Path) -> AppConfig {
         match fs::read_to_string(&path) {
             Ok(text) => match serde_saphyr::from_str(&text) {
                 Ok(cfg) => return cfg,
-                Err(e) => eprintln!("解析 app.yaml 失败，使用默认配置: {e}"),
+                Err(e) => crate::log::error(format_args!("解析 app.yaml 失败，使用默认配置: {e}")),
             },
-            Err(e) => eprintln!("读取 app.yaml 失败，使用默认配置: {e}"),
+            Err(e) => crate::log::error(format_args!("读取 app.yaml 失败，使用默认配置: {e}")),
         }
     }
     let cfg = AppConfig::default();
     match serde_saphyr::to_string(&cfg) {
         Ok(text) => {
             if let Err(e) = fs::write(&path, text) {
-                eprintln!("写入默认 app.yaml 失败: {e}");
+                crate::log::error(format_args!("写入默认 app.yaml 失败: {e}"));
             }
         }
-        Err(e) => eprintln!("序列化默认 app.yaml 失败: {e}"),
+        Err(e) => crate::log::error(format_args!("序列化默认 app.yaml 失败: {e}")),
     }
     cfg
 }
@@ -274,7 +274,7 @@ pub fn init(root: &Path) {
         root: root.to_path_buf(),
     };
     if STATE.set(RwLock::new(state)).is_err() {
-        eprintln!("配置已初始化，忽略重复 init");
+        crate::log::error(format_args!("配置已初始化，忽略重复 init"));
     }
 }
 
@@ -300,10 +300,10 @@ pub fn update<F: FnOnce(&mut AppConfig)>(f: F) {
     match serde_saphyr::to_string(&guard.config) {
         Ok(text) => {
             if let Err(e) = fs::write(&path, text) {
-                eprintln!("保存 app.yaml 失败: {e}");
+                crate::log::error(format_args!("保存 app.yaml 失败: {e}"));
             }
         }
-        Err(e) => eprintln!("序列化 app.yaml 失败: {e}"),
+        Err(e) => crate::log::error(format_args!("序列化 app.yaml 失败: {e}")),
     }
 }
 

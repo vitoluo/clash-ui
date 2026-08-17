@@ -73,7 +73,7 @@ fn bind_core(window: &MainWindow, root: PathBuf, start: Instant) {
         let root = root.clone();
         move || {
             if let Err(error) = core::restart_core(&root) {
-                eprintln!("重启 clash 核心失败: {error}");
+                crate::log::error(format_args!("重启 clash 核心失败: {error}"));
             }
             if let Some(window) = weak.upgrade() {
                 refresh(&window, &start);
@@ -84,7 +84,7 @@ fn bind_core(window: &MainWindow, root: PathBuf, start: Instant) {
         let weak = weak.clone();
         move || {
             if let Err(error) = core::update_core(&root) {
-                eprintln!("更新 clash 核心失败: {error}");
+                crate::log::error(format_args!("更新 clash 核心失败: {error}"));
             }
             if let Some(window) = weak.upgrade() {
                 refresh(&window, &start);
@@ -104,16 +104,16 @@ fn bind_online_panel(window: &MainWindow, root: PathBuf) {
                     Ok(url) => {
                         if let Err(error) = slint::invoke_from_event_loop(move || {
                             if let Err(error) = platform::open_url(&url) {
-                                eprintln!("打开在线面板失败：{error}");
+                                crate::log::error(format_args!("打开在线面板失败：{error}"));
                             }
                         }) {
-                            eprintln!("投递在线面板打开任务失败：{error}");
+                            crate::log::error(format_args!("投递在线面板打开任务失败：{error}"));
                         }
                     }
-                    Err(error) => eprintln!("准备在线面板失败：{error}"),
+                    Err(error) => crate::log::error(format_args!("准备在线面板失败：{error}")),
                 });
             if let Err(error) = task {
-                eprintln!("启动在线面板任务失败：{error}");
+                crate::log::error(format_args!("启动在线面板任务失败：{error}"));
             }
         });
 }

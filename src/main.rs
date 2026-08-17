@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 // 应用 crate 根：声明跨页面服务、页面控制器并导入 Slint 生成类型。
 
 mod app;
@@ -6,7 +8,7 @@ pub(crate) mod clash;
 mod constants;
 mod controller;
 
-pub use clash_ui::platform;
+pub use clash_ui::{log, platform};
 
 slint::include_modules!();
 

@@ -221,7 +221,7 @@ where
     F: FnOnce() + Send + 'static,
 {
     if let Err(error) = slint::invoke_from_event_loop(callback) {
-        eprintln!("设置页 UI 回调失败：{error}");
+        crate::log::error(format_args!("设置页 UI 回调失败：{error}"));
     }
 }
 

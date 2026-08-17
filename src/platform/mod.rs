@@ -223,9 +223,9 @@ pub fn set_clipboard_text(text: &str) {
     match arboard::Clipboard::new() {
         Ok(mut cb) => {
             if let Err(e) = cb.set_text(text.to_string()) {
-                eprintln!("写入剪贴板失败: {e}");
+                crate::log::error(format_args!("写入剪贴板失败: {e}"));
             }
         }
-        Err(e) => eprintln!("无法打开剪贴板: {e}"),
+        Err(e) => crate::log::error(format_args!("无法打开剪贴板: {e}")),
     }
 }

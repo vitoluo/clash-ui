@@ -568,7 +568,7 @@ where
     F: FnOnce() + Send + 'static,
 {
     if let Err(error) = slint::invoke_from_event_loop(callback) {
-        eprintln!("连接页 UI 回调失败：{error}");
+        crate::log::error(format_args!("连接页 UI 回调失败：{error}"));
     }
 }
 

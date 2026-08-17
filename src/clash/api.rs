@@ -940,7 +940,7 @@ async fn ws_loop<T, F>(
         let req = match build_ws_request(port, &secret, path) {
             Ok(r) => r,
             Err(_) => {
-                eprintln!("WS {path} 请求构造失败");
+                crate::log::error(format_args!("WS {path} 请求构造失败"));
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -948,7 +948,7 @@ async fn ws_loop<T, F>(
         let ws_stream = match connect_async(req).await {
             Ok((s, _)) => s,
             Err(error) => {
-                eprintln!("WS {path} 连接失败: {error}");
+                crate::log::error(format_args!("WS {path} 连接失败: {error}"));
                 if !stream_is_current(generation) {
                     return;
                 }
@@ -971,12 +971,12 @@ async fn ws_loop<T, F>(
                         on_value(&v);
                         let _ = tx.send(v);
                     }
-                    Err(_) => eprintln!("WS {path} 消息解析失败"),
+                    Err(_) => crate::log::error(format_args!("WS {path} 消息解析失败")),
                 },
                 Ok(Message::Close(_)) => break,
                 Ok(_) => {}
                 Err(_) => {
-                    eprintln!("WS {path} 消息读取失败");
+                    crate::log::error(format_args!("WS {path} 消息读取失败"));
                     break;
                 }
             }

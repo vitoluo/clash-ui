@@ -9,7 +9,7 @@ use crate::constants::{
     ASSETS_DIR, CLASH_DIR, CONFIGS_DIR, FIXED_YAML, FIXED_YAML_PATH, OVERRIDES_DIR, RUNTIME_DIR,
     RUNTIME_UI_DIR,
 };
-use crate::platform;
+use crate::{log, platform};
 
 const GEO_DATA_FILES: &[&str] = &["geoip.dat", "geosite.dat", "country.mmdb", "asn.mmdb"];
 
@@ -55,7 +55,11 @@ fn ensure_data_dirs(root: &Path) {
     ];
     for directory in dirs {
         if let Err(error) = fs::create_dir_all(&directory) {
-            eprintln!("创建目录失败 {}: {}", directory.display(), error);
+            crate::log::error(format_args!(
+                "创建目录失败 {}: {}",
+                directory.display(),
+                error
+            ));
         }
     }
 }
@@ -64,7 +68,11 @@ fn ensure_data_dirs(root: &Path) {
 fn ensure_resource_dirs(root: &Path) {
     for directory in [root.join(ASSETS_DIR), root.join(CLASH_DIR)] {
         if let Err(error) = fs::create_dir_all(&directory) {
-            eprintln!("创建目录失败 {}: {}", directory.display(), error);
+            crate::log::error(format_args!(
+                "创建目录失败 {}: {}",
+                directory.display(),
+                error
+            ));
         }
     }
 }
@@ -81,12 +89,12 @@ fn copy_missing_geo_data(resource_root: &Path, data_root: &Path) {
 
         let source = source_dir.join(file_name);
         if let Err(error) = fs::copy(&source, &destination) {
-            eprintln!(
+            crate::log::error(format_args!(
                 "复制地理数据库失败 {} -> {}: {}",
                 source.display(),
                 destination.display(),
                 error
-            );
+            ));
         }
     }
 }
@@ -95,7 +103,7 @@ fn copy_missing_geo_data(resource_root: &Path, data_root: &Path) {
 fn write_if_missing(path: &Path, content: &str) {
     if !path.exists() {
         if let Err(error) = fs::write(path, content) {
-            eprintln!("写入文件失败 {}: {}", path.display(), error);
+            crate::log::error(format_args!("写入文件失败 {}: {}", path.display(), error));
         }
     }
 }
@@ -103,6 +111,7 @@ fn write_if_missing(path: &Path, content: &str) {
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let resource_root = exe_dir();
     let data_root = data_root(&resource_root)?;
+    log::init(&data_root);
     let start = Instant::now();
     ensure_resource_dirs(&resource_root);
     ensure_data_dirs(&data_root);

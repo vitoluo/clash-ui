@@ -55,7 +55,7 @@ impl AppContext {
             logs_state.clone(),
         );
         if let Err(error) = core::on_config_changed(&root) {
-            eprintln!("启动 clash 核心失败: {error}");
+            crate::log::error(format_args!("启动 clash 核心失败: {error}"));
         }
         configure_theme(&main_window, &start);
 
@@ -136,7 +136,7 @@ fn register_core_stop_cleanup(
             connections::sync_ui(&window, &connections_state);
             logs::sync_ui(&window, &logs_state);
         }) {
-            eprintln!("核心停止后清理页面数据失败：{error}");
+            crate::log::error(format_args!("核心停止后清理页面数据失败：{error}"));
         }
     });
 }

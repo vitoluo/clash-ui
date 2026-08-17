@@ -278,7 +278,7 @@ pub fn set_system_proxy(enabled: bool) {
         clear_system_proxy()
     };
     if let Err(error) = result {
-        eprintln!("设置系统代理失败：{error}");
+        crate::log::error(format_args!("设置系统代理失败：{error}"));
         return;
     }
     config::update(|c| c.proxy_status.system = enabled);
@@ -302,7 +302,7 @@ pub fn restore_system_proxy() {
         )
     });
     if let Err(error) = result {
-        eprintln!("启动时恢复系统代理失败：{error}");
+        crate::log::error(format_args!("启动时恢复系统代理失败：{error}"));
         return;
     }
     refresh_home_proxy_status();
@@ -336,7 +336,7 @@ pub fn set_tun(enabled: bool) {
     let root = ROOT.with(|r| r.borrow().clone());
     if let Some(root) = root {
         if let Err(e) = core::restart_core(&root) {
-            eprintln!("应用 TUN 配置失败: {e}");
+            crate::log::error(format_args!("应用 TUN 配置失败: {e}"));
         }
     }
     refresh_home_proxy_status();
@@ -370,29 +370,29 @@ pub fn toggle_tun() {
 /// 设置 clash 出站模式（失败仅打印日志）。
 pub fn set_mode(mode: &str) {
     if core::get_port().is_none() {
-        eprintln!("设置出站模式失败：Clash 核心未运行");
+        crate::log::error(format_args!("设置出站模式失败：Clash 核心未运行"));
         return;
     }
     if let Err(e) = api::put_mode(mode) {
-        eprintln!("设置出站模式 {mode} 失败: {e}");
+        crate::log::error(format_args!("设置出站模式 {mode} 失败: {e}"));
     }
 }
 
 /// 复制指定终端的代理环境变量命令到剪贴板。
 pub fn copy_proxy_env(terminal: Terminal) {
     if core::get_port().is_none() {
-        eprintln!("获取代理环境变量失败：Clash 核心未运行");
+        crate::log::error(format_args!("获取代理环境变量失败：Clash 核心未运行"));
         return;
     }
     let endpoint = match proxy_endpoint() {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            eprintln!("获取代理环境变量失败：{error}");
+            crate::log::error(format_args!("获取代理环境变量失败：{error}"));
             return;
         }
     };
     if endpoint.ports.http.is_none() && endpoint.ports.socks.is_none() {
-        eprintln!("没有可用的代理端口，无法复制代理环境变量");
+        crate::log::error(format_args!("没有可用的代理端口，无法复制代理环境变量"));
         return;
     }
     platform::set_clipboard_text(&proxy_env_command(
@@ -420,7 +420,7 @@ pub fn show_main() {
 pub fn quit() {
     if config::get().proxy_status.system {
         if let Err(error) = clear_system_proxy() {
-            eprintln!("退出时清除系统代理失败：{error}");
+            crate::log::error(format_args!("退出时清除系统代理失败：{error}"));
         }
     }
     core::stop_core();
@@ -446,7 +446,7 @@ fn load_icons() -> Option<Icon> {
     for (i, svg) in TRAY_ICONS.iter().enumerate() {
         match rasterize(svg) {
             Some(rgba) => rgba_icons[i] = rgba,
-            None => eprintln!("光栅化托盘图标 {i} 失败"),
+            None => crate::log::error(format_args!("光栅化托盘图标 {i} 失败")),
         }
     }
     ICONS.with(|i| *i.borrow_mut() = Some(rgba_icons.clone()));
@@ -461,7 +461,7 @@ fn load_icons() -> Option<Icon> {
     let init_icon = match Icon::from_rgba(init_rgba, 64, 64) {
         Ok(icon) => icon,
         Err(e) => {
-            eprintln!("构造初始托盘图标失败: {e}");
+            crate::log::error(format_args!("构造初始托盘图标失败: {e}"));
             return None;
         }
     };
@@ -596,7 +596,7 @@ fn create_tray(menu: Menu, icon: Icon) -> Option<TrayIcon> {
     {
         Ok(tray) => Some(tray),
         Err(e) => {
-            eprintln!("创建托盘失败: {e}");
+            crate::log::error(format_args!("创建托盘失败: {e}"));
             None
         }
     }
