@@ -3,7 +3,7 @@ import { Separator } from "separator.slint";
 
 export component FormRow inherits VerticalLayout {
     in property <string> label;
-    in property <bool> need-separator: true;
+    in property <bool> has-separator: true;
 
     in-out property <length> form-height: Theme.button-md;
 
@@ -22,5 +22,5 @@ export component FormRow inherits VerticalLayout {
         @children
     }
 
-    Separator { }
+    if has-separator: Separator { }
 }

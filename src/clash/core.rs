@@ -17,6 +17,7 @@ pub enum CoreError {
     Json(serde_json::Error),
     CoreMissing,
     Spawn(std::io::Error),
+    ProcessGuard(String),
     Lock,
 }
 
@@ -29,6 +30,7 @@ impl std::fmt::Display for CoreError {
             Self::Json(error) => write!(formatter, "clash 设置转 JSON 失败: {error}"),
             Self::CoreMissing => write!(formatter, "未找到 clash 核心可执行文件"),
             Self::Spawn(error) => write!(formatter, "启动核心失败: {error}"),
+            Self::ProcessGuard(error) => write!(formatter, "监管核心进程失败：{error}"),
             Self::Lock => write!(formatter, "会话锁被污染"),
         }
     }
@@ -43,6 +45,7 @@ pub struct CoreSession {
     #[allow(dead_code)]
     pub secret: String,
     pub child: Child,
+    process_guard: crate::platform::CoreProcessGuard,
 }
 
 // 控制端点快照，保证端口和密钥来自同一会话。
@@ -159,24 +162,41 @@ pub fn start_core(root: &Path) -> Result<(), CoreError> {
     let port = generate_port();
     let secret = generate_secret();
     let runtime = root.join(RUNTIME_DIR);
-    let child = std::process::Command::new(&core)
-        .args([
-            "-d",
-            &runtime.to_string_lossy(),
-            "-ext-ctl",
-            &format!("127.0.0.1:{port}"),
-            "-secret",
-            &secret,
-        ])
-        .spawn()
-        .map_err(CoreError::Spawn)?;
+    let mut command = std::process::Command::new(&core);
+    command.args([
+        "-d",
+        &runtime.to_string_lossy(),
+        "-ext-ctl",
+        &format!("127.0.0.1:{port}"),
+        "-secret",
+        &secret,
+    ]);
+
+    // Windows 下 Clash 是控制台程序，禁止为子进程创建控制台窗口。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(0x0800_0000);
+    }
 
     let mut session = SESSION.lock().map_err(|_| CoreError::Lock)?;
+    let mut child = command.spawn().map_err(CoreError::Spawn)?;
+    let process_guard = match crate::platform::CoreProcessGuard::attach(&child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CoreError::ProcessGuard(error));
+        }
+    };
     *session = Some(CoreSession {
         port,
         secret,
         child,
+        process_guard,
     });
+    drop(session);
     crate::clash::api::start_streams();
     Ok(())
 }
@@ -184,23 +204,25 @@ pub fn start_core(root: &Path) -> Result<(), CoreError> {
 // 停止核心并清理会话。
 pub fn stop_core() {
     crate::clash::api::reset_streams();
-    if let Ok(mut session) = SESSION.lock() {
-        if let Some(mut current) = session.take() {
-            let _ = current.child.kill();
-        }
+    let current = SESSION.lock().ok().and_then(|mut session| session.take());
+    if let Some(mut current) = current {
+        terminate_core_process(&current.process_guard, &mut current.child);
     }
     notify_stop_handler();
 }
 
-// 重启核心。
-pub fn restart_core(root: &Path) -> Result<(), CoreError> {
-    stop_core();
-    start_core(root)
+fn terminate_core_process(guard: &crate::platform::CoreProcessGuard, child: &mut Child) {
+    if let Err(error) = guard.terminate() {
+        crate::log::error(format_args!("终止 clash 核心进程树失败：{error}"));
+    }
+    let _ = child.kill();
+    if let Err(error) = child.wait() {
+        crate::log::error(format_args!("回收 clash 核心进程失败：{error}"));
+    }
 }
 
-// 更新核心，当前实现采用停止后重新启动的流程。
-#[allow(dead_code)]
-pub fn update_core(root: &Path) -> Result<(), CoreError> {
+// 重启核心。
+pub fn restart_core(root: &Path) -> Result<(), CoreError> {
     stop_core();
     start_core(root)
 }
@@ -227,6 +249,17 @@ mod tests {
     use super::*;
     use crate::constants::{ASSETS_DIR, CLASH_DIR, FIXED_YAML_PATH, RUNTIME_DIR};
     use std::fs;
+    use std::process::Command;
+
+    fn spawn_long_running_child() -> Child {
+        #[cfg(windows)]
+        let child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .spawn();
+        #[cfg(unix)]
+        let child = Command::new("sh").args(["-c", "sleep 30"]).spawn();
+        child.expect("启动核心停止测试进程失败")
+    }
 
     // 创建独立临时目录，避免测试污染真实运行目录。
     fn tmp_root(name: &str) -> PathBuf {
@@ -270,5 +303,29 @@ mod tests {
         assert!(!config::get().configs.iter().any(|entry| entry.enabled));
         assert!(start_core(&root).is_ok());
         assert!(SESSION.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn terminates_and_reaps_running_child() {
+        let mut child = spawn_long_running_child();
+        let guard =
+            crate::platform::CoreProcessGuard::attach(&child).expect("创建测试进程守卫失败");
+
+        terminate_core_process(&guard, &mut child);
+
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn reaps_child_that_has_already_exited() {
+        let mut child = spawn_long_running_child();
+        let guard =
+            crate::platform::CoreProcessGuard::attach(&child).expect("创建测试进程守卫失败");
+        child.kill().expect("终止测试进程失败");
+        child.wait().expect("首次回收测试进程失败");
+
+        terminate_core_process(&guard, &mut child);
+
+        assert!(child.try_wait().unwrap().is_some());
     }
 }

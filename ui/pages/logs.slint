@@ -41,7 +41,7 @@ export component LogsPage inherits Rectangle {
         spacing: Theme.spacing-xs;
 
         HorizontalLayout {
-            tabs := Tabs {
+            Tabs {
                 horizontal-stretch: 0;
                 variant: TabsVariant.line;
                 items: [
@@ -127,11 +127,13 @@ export component LogsPage inherits Rectangle {
         }
 
         Rectangle {
-            ListView {
-                width: parent.width;
-                height: parent.height;
+            log-list := ListView {
                 auto-scroll: !LogsModel.paused;
-                scroll-revision: LogsModel.scroll-revision;
+                scrolled => {
+                    if LogsModel.paused == false {
+                        LogsModel.toggle-pause();
+                    }
+                }
 
                 for row[index] in LogsModel.rows: VerticalLayout {
                     HorizontalLayout {

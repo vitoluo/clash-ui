@@ -444,24 +444,23 @@ export component SettingsPage inherits Rectangle {
         height: root.height;
         open: SettingsModel.dialog-kind == 1;
         title: "端口设置";
-        description: "三者不可全空；混合端口有值时忽略 HTTP 与 SOCKS。";
         dismissed => { SettingsModel.close-dialog(); }
 
         VerticalLayout {
             spacing: Theme.spacing-sm;
             Input {
                 text <=> SettingsModel.port-mixed-draft;
-                placeholder: "混合端口 mixed-port";
+                placeholder: "混合端口（同时支持 HTTP 和 SOCKS）";
             }
 
             Input {
                 text <=> SettingsModel.port-http-draft;
-                placeholder: "HTTP 端口 port";
+                placeholder: "HTTP 端口";
             }
 
             Input {
                 text <=> SettingsModel.port-socks-draft;
-                placeholder: "SOCKS 端口 socks-port";
+                placeholder: "SOCKS 端口";
             }
 
             HorizontalLayout {
@@ -489,6 +488,9 @@ export component SettingsPage inherits Rectangle {
         title: SettingsModel.dialog-list-kind == 0 ? "排除网段" :
             (SettingsModel.dialog-list-kind == 1 ? "排除接口" : "跳过代理");
         dismissed => { SettingsModel.close-dialog(); }
+        changed open => {
+            content-list.viewport-y = 0;
+        }
 
         VerticalLayout {
             spacing: Theme.spacing-sm;
@@ -497,22 +499,23 @@ export component SettingsPage inherits Rectangle {
                 color: Theme.ink-subtle;
                 font-size: Theme.typography-body-sm;
             }
-            ListView {
+            content-list := ListView {
                 property <length> content-height: SettingsModel.dialog-list-items.length * Theme.button-md
                     + (SettingsModel.dialog-list-items.length - 1) * Theme.spacing-sm;
                 height: content-height < 320px ? content-height : 320px;
-                for item[index] in SettingsModel.dialog-list-items: HorizontalLayout {
-                    states [
-                        has-padding when index < SettingsModel.dialog-list-items.length - 1: {
-                            padding-bottom: Theme.spacing-sm;
-                        }
-                    ]
+                for item[index] in SettingsModel.dialog-list-items: VerticalLayout {
                     ListEditorRow {
                         value: item.value;
                         placeholder: "填写一项";
                         edited(value) => { SettingsModel.edit-list-item(index, value); }
                         removed => { SettingsModel.remove-list-item(index); }
                     }
+
+                    states [
+                        had-padding when index < SettingsModel.dialog-list-items.length - 1: {
+                            padding-bottom: Theme.spacing-sm;
+                        }
+                    ]
                 }
             }
 
@@ -538,6 +541,7 @@ export component SettingsPage inherits Rectangle {
                     text: "取消";
                     clicked => { SettingsModel.close-dialog(); }
                 }
+
                 Button {
                     text: "保存";
                     clicked => {
@@ -558,20 +562,23 @@ export component SettingsPage inherits Rectangle {
 
         VerticalLayout {
             spacing: Theme.spacing-sm;
-            Input {
+            if SettingsModel.uwp-apps.length == 0: Text {
+                text: "暂无匹配应用";
+                color: Theme.ink-subtle;
+                font-size: Theme.typography-body-sm;
+            }
+            if SettingsModel.uwp-apps.length > 0:Input {
                 text <=> SettingsModel.uwp-search;
                 placeholder: "搜索应用名称";
                 edited(value) => { SettingsModel.search-uwp(value); }
             }
-
-            apps := Flickable {
-                height: 240px;
-                viewport-width: self.width;
-                viewport-height: uwp-list.preferred-height;
-                uwp-list := VerticalLayout {
-                    width: apps.width;
-                    spacing: Theme.spacing-xxs;
-                    for app in SettingsModel.uwp-apps: FormRow {
+            uwp-list := ListView {
+                property <length> content-height: SettingsModel.uwp-apps.length * Theme.button-md
+                    + (SettingsModel.uwp-apps.length - 1) * Theme.spacing-sm;
+                height: content-height < 240px ? content-height : 240px;
+                for app[idx] in SettingsModel.uwp-apps: VerticalLayout {
+                    spacing: Theme.spacing-sm;
+                    FormRow {
                         label: app.name;
                         Switch {
                             checked: app.enabled;
@@ -580,22 +587,25 @@ export component SettingsPage inherits Rectangle {
                                 SettingsModel.toggle-uwp(app.package-family-name, value);
                             }
                         }
-                    }
-                    if SettingsModel.uwp-apps.length == 0: Text {
-                        text: "暂无匹配应用";
-                        color: Theme.ink-subtle;
-                        font-size: Theme.typography-body-sm;
+
+                        states [
+                            non-separator when idx == SettingsModel.uwp-apps.length - 1: {
+                                has-separator: false;
+                            }
+                        ]
                     }
                 }
             }
 
             HorizontalLayout {
                 alignment: end;
+                spacing: Theme.spacing-xs;
                 Button {
                     variant: ButtonVariant.ghost;
                     text: "取消";
                     clicked => { SettingsModel.close-dialog(); }
                 }
+
                 Button {
                     variant: ButtonVariant.default;
                     disabled: SettingsModel.operation-busy;

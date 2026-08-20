@@ -1,5 +1,20 @@
 // macOS 平台专属能力。
 
+use std::process::Child;
+
+/// macOS 核心进程守卫；进程树由终端信号和直接子进程句柄管理。
+pub struct CoreProcessGuard;
+
+impl CoreProcessGuard {
+    pub fn attach(_child: &Child) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    pub fn terminate(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 pub(super) fn proxy_bypass_string(bypass: &[String]) -> String {
     bypass
         .iter()

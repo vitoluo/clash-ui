@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Timer};
@@ -12,6 +14,32 @@ use crate::clash::{api, core};
 use crate::constants::RUNTIME_UI_DIR;
 use crate::controller::tray;
 use crate::{platform, MainWindow};
+
+struct CoreUpgradeGuard {
+    active: Arc<AtomicBool>,
+}
+
+impl CoreUpgradeGuard {
+    fn try_acquire(active: Arc<AtomicBool>) -> Option<Self> {
+        active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self { active })
+    }
+}
+
+impl Drop for CoreUpgradeGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+fn set_toast(window: &MainWindow, message: &str, variant: i32) {
+    let model = window.global::<crate::HomeModel>();
+    model.set_toast_message(message.to_string().into());
+    model.set_toast_variant(variant);
+    model.set_toast_visible(true);
+}
 
 pub(crate) fn bind_callbacks(window: &MainWindow, root: PathBuf, start: Instant, timer: &Timer) {
     bind_mode_and_proxy(window, start);
@@ -68,6 +96,7 @@ fn bind_mode_and_proxy(window: &MainWindow, start: Instant) {
 
 fn bind_core(window: &MainWindow, root: PathBuf, start: Instant) {
     let weak = window.as_weak();
+    let upgrade_active = Arc::new(AtomicBool::new(false));
     window.global::<crate::HomeModel>().on_restart_core({
         let weak = weak.clone();
         let root = root.clone();
@@ -82,12 +111,43 @@ fn bind_core(window: &MainWindow, root: PathBuf, start: Instant) {
     });
     window.global::<crate::HomeModel>().on_update_core({
         let weak = weak.clone();
+        let upgrade_active = upgrade_active.clone();
         move || {
-            if let Err(error) = core::update_core(&root) {
-                crate::log::error(format_args!("更新 clash 核心失败: {error}"));
-            }
+            let Some(guard) = CoreUpgradeGuard::try_acquire(upgrade_active.clone()) else {
+                return;
+            };
             if let Some(window) = weak.upgrade() {
-                refresh(&window, &start);
+                window.global::<crate::HomeModel>().set_core_updating(true);
+            }
+            let weak = weak.clone();
+            let spawn_failure_weak = weak.clone();
+            let task_start = start;
+            let task = std::thread::Builder::new()
+                .name("core-upgrade".to_string())
+                .spawn(move || {
+                    let _guard = guard;
+                    let update_error = api::upgrade().err().map(|error| {
+                        crate::log::error(format_args!("更新 clash 核心失败: {error}"));
+                        format!("更新核心失败：{error}")
+                    });
+                    if let Err(error) = slint::invoke_from_event_loop(move || {
+                        if let Some(window) = weak.upgrade() {
+                            window.global::<crate::HomeModel>().set_core_updating(false);
+                            if let Some(error) = update_error {
+                                set_toast(&window, &error, 2);
+                            }
+                            refresh(&window, &task_start);
+                        }
+                    }) {
+                        crate::log::error(format_args!("投递核心更新刷新任务失败：{error}"));
+                    }
+                });
+            if let Err(error) = task {
+                crate::log::error(format_args!("启动核心更新任务失败：{error}"));
+                if let Some(window) = spawn_failure_weak.upgrade() {
+                    window.global::<crate::HomeModel>().set_core_updating(false);
+                    set_toast(&window, &format!("更新核心失败：{error}"), 2);
+                }
             }
         }
     });
@@ -296,6 +356,16 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::path::PathBuf;
+
+    #[test]
+    fn core_upgrade_guard_allows_only_one_active_task() {
+        let active = Arc::new(AtomicBool::new(false));
+        let first = CoreUpgradeGuard::try_acquire(active.clone()).expect("首次应获取更新守卫");
+        assert!(CoreUpgradeGuard::try_acquire(active.clone()).is_none());
+
+        drop(first);
+        assert!(CoreUpgradeGuard::try_acquire(active).is_some());
+    }
 
     fn tmp_root(name: &str) -> PathBuf {
         let root =

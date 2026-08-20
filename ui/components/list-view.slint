@@ -15,35 +15,54 @@ component ScrollBar inherits Rectangle {
         width: parent.width;
         height: parent.height;
         mouse-cursor: root.enabled ? pointer : default;
-        property <{ pressed-value: length, maximum: length, mouse-x: length, mouse-y: length }> saved-values;
 
-        function save-pointer-position() {
-            self.saved-values = {
-                pressed-value: -root.value,
-                maximum: root.maximum,
-                mouse-x: self.mouse-x,
-                mouse-y: self.mouse-y,
-            };
-        }
+        // 保存按下时的状态
+        property <bool> pressed-on-handle: false;
+        property <length> press-offset: 0px;   // 鼠标相对于滑块顶部的偏移
 
         pointer-event(event) => {
             if (root.enabled
                 && event.button == PointerEventButton.left
                 && event.kind == PointerEventKind.down) {
-                self.save-pointer-position();
+
+                // 判断是否点在滑块上
+                if (self.mouse-y >= handle.y && self.mouse-y <= handle.y + handle.height) {
+                    // 点在滑块上 → 相对拖动
+                    self.pressed-on-handle = true;
+                    self.press-offset = self.mouse-y - handle.y;
+                } else {
+                    // 点在轨道空白处 → 绝对定位（中心对准）
+                    self.pressed-on-handle = false;
+                    self.update-absolute();
+                }
             }
         }
 
         moved => {
             if (root.enabled && self.pressed) {
-                if (self.saved-values.maximum != root.maximum) {
-                    self.save-pointer-position();
+                if (self.pressed-on-handle) {
+                    // 相对拖动
+                    self.update-relative();
+                } else {
+                    // 绝对定位
+                    self.update-absolute();
                 }
-                root.scroll-to(-max(0px, min(root.maximum,
-                    self.saved-values.pressed-value
-                    + (self.mouse-y - self.saved-values.mouse-y)
-                    * root.maximum / max(1px, parent.height - handle.height))));
             }
+        }
+
+        // 相对拖动：保持按下时的偏移
+        function update-relative() {
+            let track-height = max(1px, parent.height - handle.height);
+            let new-y = self.mouse-y - self.press-offset;
+            let ratio = max(0.0, min(1.0, new-y / track-height));
+            root.scroll-to(-(ratio * root.maximum));
+        }
+
+        // 绝对定位：滑块中心对准鼠标
+        function update-absolute() {
+            let track-height = max(1px, parent.height - handle.height);
+            let ratio = max(0.0, min(1.0, (self.mouse-y - handle.height / 2) / track-height));
+            root.scroll-to(-(ratio * root.maximum));
         }
 
         scroll-event(event) => {
@@ -66,7 +85,6 @@ component ScrollBar inherits Rectangle {
         background: scroll-touch.has-hover || scroll-touch.pressed
             ? Theme.scroll-focus : Theme.scroll;
         border-radius: 3px;
-
         animate background {
             duration: Theme.duration-hover;
             easing: Theme.easing-hover;
@@ -109,19 +127,20 @@ export component ScrollView inherits Rectangle {
 
 export component ListView inherits ScrollView {
     in property <bool> auto-scroll: false;
-    in property <int> scroll-revision: 0;
 
-    function scroll-to-end() {
+    public function reset-viewport() {
+        root.viewport-y = 0;
+    }
+
+    public function set-viewport(viewport-y: length) {
+        root.viewport-y = viewport-y;
+    }
+
+    public function scroll-to-end() {
         root.viewport-y = min(0px, root.visible-height - root.viewport-height);
     }
 
     changed viewport-height => {
-        if (root.auto-scroll) {
-            root.scroll-to-end();
-        }
-    }
-
-    changed scroll-revision => {
         if (root.auto-scroll) {
             root.scroll-to-end();
         }

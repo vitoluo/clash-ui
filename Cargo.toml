@@ -29,22 +29,29 @@ elevated-command = "1.1"
 sysproxy = { git = "https://github.com/clash-verge-rev/sysproxy-rs.git", branch = "0.5.4" }
 display-info = "0.5.9"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [build-dependencies]
 lucide-slint = "1.28.0"
 slint-build = "1"
-
-# 构建期 Windows 资源（图标）嵌入，仅 Windows。
-[target.'cfg(windows)'.build-dependencies]
-winres = "0.1"
 
 # 配置开发环境 (cargo build) 的编译参数
 [profile.dev]
 opt-level = 0          # 启用基础优化，平衡编译速度与运行性能
 incremental = true     # 开启增量编译，提升反复编译的速度
 debug = 1              # 仅保留行号信息，减小体积、加快链接
-codegen-units = 16     # 充分利用多核CPU进行并行编译
 
-# 针对所有依赖项进行优化，防止内存占用过高 (OOM)
+# 针对所有依赖项进行优化
 [profile.dev.package."*"]
-codegen-units = 16
 incremental = false    # 关闭依赖的增量编译以节省磁盘空间
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
+panic = "abort"
+codegen-units = 1 

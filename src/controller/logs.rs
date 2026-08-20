@@ -150,7 +150,6 @@ pub struct LogsViewState {
     pub all_level: LogLevel,
     pub query: String,
     pub auto_scroll: bool,
-    pub scroll_revision: u64,
     next_sequence: u64,
 }
 
@@ -305,7 +304,6 @@ pub fn sync_ui(window: &MainWindow, state: &SharedLogsState) {
     model.set_all_level_index(state.all_level.index());
     model.set_query(state.query.clone().into());
     model.set_paused(state.paused());
-    model.set_scroll_revision(state.scroll_revision as i32);
 }
 
 pub fn attach_ui(recorder: &LogsRecorder, weak: Weak<MainWindow>) {
@@ -346,7 +344,6 @@ impl Default for LogsViewState {
             all_level: LogLevel::Debug,
             query: String::new(),
             auto_scroll: true,
-            scroll_revision: 0,
             next_sequence: 1,
         }
     }
@@ -376,10 +373,6 @@ impl LogsViewState {
         while self.records.len() > MAX_LOG_RECORDS {
             self.records.pop_front();
         }
-        let query = self.query.to_lowercase();
-        if self.auto_scroll && self.matches_level(&record) && Self::matches_query(&record, &query) {
-            self.bump_scroll_revision();
-        }
         true
     }
 
@@ -395,35 +388,28 @@ impl LogsViewState {
     pub fn set_tab(&mut self, tab: LogTab) {
         if self.selected_tab != tab {
             self.selected_tab = tab;
-            self.bump_scroll_if_enabled();
         }
     }
 
     pub fn set_all_level(&mut self, level: LogLevel) {
         if self.all_level != level {
             self.all_level = level;
-            self.bump_scroll_if_enabled();
         }
     }
 
     pub fn set_query(&mut self, query: String) {
         if self.query != query {
             self.query = query;
-            self.bump_scroll_if_enabled();
         }
     }
 
     pub fn toggle_pause(&mut self) {
         self.auto_scroll = !self.auto_scroll;
-        if self.auto_scroll {
-            self.bump_scroll_revision();
-        }
     }
 
     pub fn clear(&mut self) {
         if !self.records.is_empty() {
             self.records.clear();
-            self.bump_scroll_if_enabled();
         }
     }
 
@@ -440,16 +426,6 @@ impl LogsViewState {
 
     fn matches_query(record: &LogRecord, query: &str) -> bool {
         query.is_empty() || record.message_lowercase.contains(query)
-    }
-
-    fn bump_scroll_if_enabled(&mut self) {
-        if self.auto_scroll {
-            self.bump_scroll_revision();
-        }
-    }
-
-    fn bump_scroll_revision(&mut self) {
-        self.scroll_revision = self.scroll_revision.wrapping_add(1).max(1);
     }
 }
 
@@ -561,21 +537,6 @@ mod tests {
         clear_runtime(&state);
 
         assert!(read_state(&state).records().is_empty());
-    }
-
-    #[test]
-    fn pause_does_not_block_receive_and_resume_increments_revision() {
-        let mut state = sample_state();
-        let revision = state.scroll_revision;
-        state.toggle_pause();
-        assert!(state.paused());
-        assert_eq!(state.scroll_revision, revision);
-        assert!(state.append_line(line(5, "debug", "paused")));
-        assert_eq!(state.records().len(), 5);
-        assert_eq!(state.scroll_revision, revision);
-        state.toggle_pause();
-        assert!(!state.paused());
-        assert!(state.scroll_revision > revision);
     }
 
     #[test]

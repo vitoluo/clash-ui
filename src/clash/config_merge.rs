@@ -177,6 +177,12 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
     deep_merge(&mut merged, &fixed_value);
 
     if let Value::Object(map) = &mut merged {
+        // 合并完成后移除可选代理端口的 null 值，避免传给核心无效配置。
+        for key in ["port", "socks-port", "mixed-port"] {
+            if map.get(key).is_some_and(|value| value.is_null()) {
+                map.remove(key);
+            }
+        }
         map.remove("external-controller");
         map.remove("secret");
     }
@@ -357,5 +363,25 @@ mod tests {
         let output = fs::read_to_string(root.join(RUNTIME_DIR).join("config.yaml")).unwrap();
         let value: Value = serde_saphyr::from_str(&output).unwrap();
         assert_eq!(value["tun"]["enable"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn removes_null_proxy_ports_after_merge() {
+        let root = tmp_root("null_ports");
+        fs::create_dir_all(root.join(ASSETS_DIR)).unwrap();
+        fs::write(root.join(FIXED_YAML_PATH), "external-ui: ui\n").unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.clash.port = None;
+        cfg.settings.clash.socks_port = None;
+        cfg.settings.clash.mixed_port = None;
+
+        merge_config_inner(&root, &cfg).unwrap();
+        let output = fs::read_to_string(root.join(RUNTIME_DIR).join("config.yaml")).unwrap();
+        let value: Value = serde_saphyr::from_str(&output).unwrap();
+
+        assert!(value.get("port").is_none());
+        assert!(value.get("socks-port").is_none());
+        assert!(value.get("mixed-port").is_none());
     }
 }

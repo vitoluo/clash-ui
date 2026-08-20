@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 use std::time::Instant;
 
 use slint::{ComponentHandle, LogicalPosition, LogicalSize};
@@ -26,6 +28,8 @@ pub(crate) struct AppContext {
     pub(crate) _connections_recorder: connections::ConnectionsRecorder,
     pub(crate) _logs_recorder: logs::LogsRecorder,
     pub(crate) home_timer: slint::Timer,
+    #[cfg(target_os = "linux")]
+    pub(crate) gtk_event_timer: slint::Timer,
 }
 
 impl AppContext {
@@ -73,6 +77,8 @@ impl AppContext {
             _connections_recorder: connections_recorder,
             _logs_recorder: logs_recorder,
             home_timer: slint::Timer::default(),
+            #[cfg(target_os = "linux")]
+            gtk_event_timer: slint::Timer::default(),
         })
     }
 
@@ -96,6 +102,12 @@ impl AppContext {
     pub(crate) fn start_services(&self) {
         speed_stats::start(&self.main_window);
         tray::init(self.root.clone(), self.main_window.as_weak());
+        #[cfg(target_os = "linux")]
+        self.gtk_event_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(16),
+            tray::pump_gtk_events,
+        );
         tray::restore_system_proxy();
     }
 

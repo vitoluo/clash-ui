@@ -5,6 +5,7 @@ import { Switch } from "../components/switch.slint";
 import { Select } from "../components/select.slint";
 import { Button, ButtonSize, ButtonVariant } from "../components/button.slint";
 import { ResponsiveGrid } from "../components/responsive-grid.slint";
+import { Toaster, ToastVariant } from "../components/toast.slint";
 
 export global HomeModel {
     in-out property <string> platform-name: "—";
@@ -14,11 +15,15 @@ export global HomeModel {
     in-out property <bool> tun-proxy: false;
     in-out property <string> core-version: "—";
     in-out property <bool> core-running: false;
+    in-out property <bool> core-updating: false;
     in-out property <string> client-mem: "—";
     in-out property <string> core-mem: "—";
     in-out property <string> uptime: "0:00:00";
     in-out property <string> client-version: "—";
     in-out property <string> zashboard-url: "";
+    in-out property <bool> toast-visible: false;
+    in-out property <string> toast-message: "";
+    in-out property <int> toast-variant: 0;
 
     callback change-mode(int);
     callback copy-env(int);
@@ -37,6 +42,7 @@ component HomeCard inherits Card {
     in-out property <bool> checked: false;
     in property <bool> enabled: true;
     in property <bool> running: false;
+    in property <bool> updating: false;
     callback action(int);
     property <length> link-height: 32px;
 
@@ -83,12 +89,16 @@ component HomeCard inherits Card {
                     size: ButtonSize.xs;
                     is-icon: true;
                     variant: ButtonVariant.ghost;
-                    tips: "更新核心";
+                    tips: root.updating ? "更新中" : "更新核心";
+                    disabled: root.updating;
                     clicked => { root.action(1); }
-                    IconDisplay {
-                        icon: IconSet.Download;
-                        size: Theme.typography-body-sm;
-                        stroke: Theme.ink;
+                    Rectangle {
+                        transform-rotation: root.updating ? animation-tick() / 2s * 360deg : 0deg;
+                        IconDisplay {
+                            icon: root.updating ? IconSet.LoaderCircle : IconSet.Download;
+                            size: Theme.typography-body-sm;
+                            stroke: Theme.ink;
+                        }
                     }
                 }
             }
@@ -232,6 +242,7 @@ export component HomePage inherits Rectangle {
                     detail: HomeModel.core-version;
                     kind: 5;
                     running: HomeModel.core-running;
+                    updating: HomeModel.core-updating;
                     action(i) => { if (i == 0) { HomeModel.restart-core(); } else { HomeModel.update-core(); } }
                 }
 
@@ -275,5 +286,14 @@ export component HomePage inherits Rectangle {
                 }
             }
         }
+    }
+
+    Toaster {
+        width: root.width;
+        height: root.height;
+        shown <=> HomeModel.toast-visible;
+        text: HomeModel.toast-message;
+        variant: HomeModel.toast-variant == 1 ? ToastVariant.success
+            : (HomeModel.toast-variant == 2 ? ToastVariant.error : ToastVariant.default);
     }
 }

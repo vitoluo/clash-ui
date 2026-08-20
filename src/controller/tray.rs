@@ -416,6 +416,33 @@ pub fn show_main() {
     });
 }
 
+#[cfg(target_os = "linux")]
+fn initialize_gtk() -> bool {
+    if gtk::is_initialized_main_thread() {
+        return true;
+    }
+    if gtk::is_initialized() {
+        crate::log::error(format_args!("GTK 已在非主线程初始化，无法创建 Linux 托盘"));
+        return false;
+    }
+    if let Err(error) = gtk::init() {
+        crate::log::error(format_args!("初始化 GTK 托盘后端失败: {error}"));
+        return false;
+    }
+    true
+}
+
+/// 在 Slint/Winit 事件循环中处理 GTK 主上下文事件。
+#[cfg(target_os = "linux")]
+pub fn pump_gtk_events() {
+    if !gtk::is_initialized_main_thread() {
+        return;
+    }
+    while gtk::events_pending() {
+        gtk::main_iteration_do(false);
+    }
+}
+
 /// 退出：清除系统代理、停止核心并退出事件循环。
 pub fn quit() {
     if config::get().proxy_status.system {
@@ -429,6 +456,11 @@ pub fn quit() {
 
 /// 初始化托盘：光栅化图标、构建菜单、注册事件分发。须在 Slint 主线程调用。
 pub fn init(root: PathBuf, window: slint::Weak<MainWindow>) {
+    #[cfg(target_os = "linux")]
+    if !initialize_gtk() {
+        return;
+    }
+
     let Some(init_icon) = load_icons() else {
         return;
     };

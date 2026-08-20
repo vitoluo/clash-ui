@@ -518,6 +518,11 @@ pub fn patch_configs(patch: &PatchConfigs) -> Result<(), ApiError> {
     })
 }
 
+/// 更新核心
+pub fn upgrade() -> Result<(), ApiError> {
+    block(async { req_status(reqwest::Method::POST, "/upgrade", None, None).await })
+}
+
 /// 请求核心下载并解压在线面板。
 pub fn upgrade_ui() -> Result<(), ApiError> {
     block(async { req_status(reqwest::Method::POST, "/upgrade/ui", None, None).await })
