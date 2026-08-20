@@ -24,6 +24,17 @@ cargo run
 cargo build --release
 ```
 
+## 覆写数组 key 规则
+
+覆写或配置文件中的数组字段默认由后者整体替换前者。如需在已有数组上增删元素，可使用以下兄弟键指令；指令键仅在合并时生效，不会写入最终的 `config.yaml`：
+
+- `key`：整体替换 `key` 数组（默认行为）。
+- `key::^`：将数组元素前置到 `key` 数组开头。
+- `key::$`：将数组元素追加到 `key` 数组末尾。
+- `key::N`（`N` 为非负整数）：将数组元素插入到 `key` 数组第 `N` 个索引之后；当 `N` 大于或等于当前长度时追加到末尾；`key` 不存在或不是数组时按空数组处理。
+
+上述指令支持任意嵌套层级。同一合并层中先处理普通键，再处理指令键，确保替换先于插入生效。
+
 ## 主要依赖与致谢
 
 本项目使用或参考以下开源项目：
@@ -34,6 +45,7 @@ cargo build --release
 | [slintcn](https://github.com/zero-sq/slintcn) | Slint UI 组件注册表及组件来源 | [文档](https://zero-sq.github.io/slintcn/) |
 | [lucide-slint](https://github.com/cnlancehu/lucide-slint) | Slint 图标库 | [crates.io](https://crates.io/crates/lucide-slint) |
 | [mihomo](https://github.com/MetaCubeX/mihomo) | Clash 兼容的代理核心 | [官方文档](https://wiki.metacubex.one/) |
+| [zashboard](https://github.com/Zephyruso/zashboard) | Mihomo/Clash Web UI | [GitHub](https://github.com/Zephyruso/zashboard) |
 | [clash-verge-rev/sysproxy-rs](https://github.com/clash-verge-rev/sysproxy-rs) | 系统代理设置 | [GitHub](https://github.com/clash-verge-rev/sysproxy-rs/) |
 
 感谢上述项目及其贡献者。
