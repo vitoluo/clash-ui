@@ -257,6 +257,7 @@ pub fn refresh(main_window: &MainWindow, start: &Instant) {
             _ => "—",
         };
         home.set_outbound_mode(mode.into());
+        tray::set_outbound_mode(&configs.mode);
     }
 
     let proxy_status = config::get().proxy_status;

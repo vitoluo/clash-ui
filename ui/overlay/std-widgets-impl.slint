@@ -2,6 +2,9 @@
 
 import { Theme } from "../theme.slint";
 
+// 菜单降级实现由 Slint 编译器要求从 std-widgets-impl.slint 导出。
+export { MenuBarImpl, PopupMenuImpl } from "builtin:/common/menus.slint";
+
 export component ToolTipImpl inherits Rectangle {
     in property <styled-text> text;
 

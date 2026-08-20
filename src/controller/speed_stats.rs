@@ -9,9 +9,6 @@
 // 注意：本版本 Slint 1.17.1 无内置 Canvas 元素，故改用 Path + viewbox 方案
 //       （与 plan.md 中「Canvas 不可用时退路为 Path」一致，且响应式更稳）。
 
-use slint::ComponentHandle;
-use slint::Global;
-
 use crate::MainWindow;
 use crate::SpeedModel;
 
@@ -24,7 +21,9 @@ const CHART_H: f32 = 56.0;
 /// 启动网速统计后台线程。必须在 MainWindow 创建之后调用。
 pub fn start(window: &MainWindow) {
     // 取得 SpeedModel 全局的弱引用，便于在事件循环闭包中安全取用。
-    let speed = window.global::<SpeedModel>().as_weak();
+    let speed_model = <SpeedModel<'_> as slint::Global<'_, MainWindow>>::get(window);
+    let speed: slint::Weak<SpeedModel<'static>> =
+        <SpeedModel<'_> as slint::Global<'_, MainWindow>>::as_weak(&speed_model);
 
     // 核心尚未启动也可能已能订阅（broadcast 发送端常驻），返回 None 时直接退出。
     let Some(mut rx) = crate::clash::api::traffic_rx() else {

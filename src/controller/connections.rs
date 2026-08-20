@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use serde_json::Value;
 use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 use tokio::sync::broadcast;
 
@@ -342,12 +341,14 @@ fn secondary_text(record: &ConnectionRecord) -> String {
     if !record.entry.metadata.network.is_empty() {
         values.push(record.entry.metadata.network.clone());
     }
-    if !record.entry.rule.is_empty() {
-        values.push(format!("规则: {}", record.entry.rule));
+    if !record.entry.chains.is_empty() {
+        values.push(record.entry.chains[0].clone());
     }
-    let chain = connection_chain(record);
-    if !chain.is_empty() {
-        values.push(format!("代理链: {chain}"));
+    if !record.entry.rule.is_empty() {
+        values.push(format!(
+            "{}: {}",
+            record.entry.rule, record.entry.rule_payload
+        ));
     }
     values.join(" · ")
 }
@@ -358,7 +359,12 @@ pub fn project_rows(state: &ConnectionsViewState) -> Vec<ConnectionRow> {
         .map(|item| ConnectionRow {
             id: item.identity.into(),
             cells: ModelRc::new(VecModel::from(vec![
-                connection_host(&item.record).to_string().into(),
+                format!(
+                    "{} → {}",
+                    item.record.entry.metadata.process,
+                    connection_host(&item.record).to_string()
+                )
+                .into(),
                 format_rate(item.record.download_rate).into(),
                 format_rate(item.record.upload_rate).into(),
                 format_bytes(item.record.entry.download).into(),
@@ -412,30 +418,6 @@ fn record_for_identity<'a>(
     }
 }
 
-fn format_json_value(value: Value) -> String {
-    match value {
-        Value::String(value) => value,
-        Value::Null => "null".to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::Array(_) | Value::Object(_) => {
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
-        }
-    }
-}
-
-fn json_string_array(values: &[String]) -> String {
-    format_json_value(Value::Array(
-        values.iter().cloned().map(Value::String).collect(),
-    ))
-}
-
-fn json_optional_string_array(values: &Option<Vec<String>>) -> String {
-    values
-        .as_deref()
-        .map_or_else(|| "null".to_string(), json_string_array)
-}
-
 fn push_field(fields: &mut Vec<(String, String)>, label: &str, value: String) {
     fields.push((label.to_string(), value));
 }
@@ -448,11 +430,11 @@ pub fn detail_fields(record: &ConnectionRecord) -> Vec<(String, String)> {
     push_field(&mut fields, "已上传", entry.upload.to_string());
     push_field(&mut fields, "已下载", entry.download.to_string());
     push_field(&mut fields, "建立时间", entry.start.clone());
-    push_field(&mut fields, "代理链", json_string_array(&entry.chains));
+    push_field(&mut fields, "代理链", entry.chains.join(" → "));
     push_field(
         &mut fields,
         "代理提供者链",
-        json_string_array(&entry.provider_chains),
+        entry.provider_chains.join(" → "),
     );
     push_field(&mut fields, "匹配规则", entry.rule.clone());
     push_field(&mut fields, "规则内容", entry.rule_payload.clone());
@@ -464,12 +446,20 @@ pub fn detail_fields(record: &ConnectionRecord) -> Vec<(String, String)> {
     push_field(
         &mut fields,
         "源 IP 地理信息",
-        json_optional_string_array(&metadata.source_geo_ip),
+        metadata
+            .source_geo_ip
+            .as_ref()
+            .map(|s| s.join(" → "))
+            .unwrap_or_default(),
     );
     push_field(
         &mut fields,
         "目标 IP 地理信息",
-        json_optional_string_array(&metadata.destination_geo_ip),
+        metadata
+            .destination_geo_ip
+            .as_ref()
+            .map(|s| s.join(" → "))
+            .unwrap_or_default(),
     );
     push_field(&mut fields, "源 IP ASN", metadata.source_ip_asn.clone());
     push_field(
@@ -830,16 +820,6 @@ pub fn connection_host(record: &ConnectionRecord) -> &str {
         &record.entry.metadata.destination_ip
     } else {
         "未知主机"
-    }
-}
-
-pub fn connection_chain(record: &ConnectionRecord) -> String {
-    if !record.entry.chains.is_empty() {
-        record.entry.chains.join(" → ")
-    } else if !record.entry.provider_chains.is_empty() {
-        record.entry.provider_chains.join(" → ")
-    } else {
-        String::new()
     }
 }
 

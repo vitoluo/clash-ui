@@ -1,6 +1,4 @@
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::time::Duration;
 use std::time::Instant;
 
 use slint::{ComponentHandle, LogicalPosition, LogicalSize};
@@ -11,13 +9,14 @@ use crate::controller::{
     config as config_page, connections, home, logs, proxy, r#override as override_page, rules,
     settings, speed_stats, tray,
 };
-use crate::{platform, MainWindow};
+use crate::{platform, ClashTray, MainWindow};
 
 /// 应用运行期间共享的生命周期资源。
 pub(crate) struct AppContext {
     pub(crate) root: PathBuf,
     pub(crate) start: Instant,
     pub(crate) main_window: MainWindow,
+    pub(crate) tray: Option<ClashTray>,
     pub(crate) proxy_state: proxy::SharedProxyState,
     pub(crate) rules_state: rules::SharedRulesState,
     pub(crate) config_state: config_page::SharedConfigState,
@@ -28,8 +27,6 @@ pub(crate) struct AppContext {
     pub(crate) _connections_recorder: connections::ConnectionsRecorder,
     pub(crate) _logs_recorder: logs::LogsRecorder,
     pub(crate) home_timer: slint::Timer,
-    #[cfg(target_os = "linux")]
-    pub(crate) gtk_event_timer: slint::Timer,
 }
 
 impl AppContext {
@@ -42,6 +39,26 @@ impl AppContext {
         connections::attach_ui(&connections_recorder, main_window.as_weak());
         logs::attach_ui(&logs_recorder, main_window.as_weak());
         configure_window(&main_window);
+        // Slint 1.17.1 的 live-preview 解释器无法正确显示 SystemTrayIcon。
+        let tray = if std::env::var_os("SLINT_LIVE_PREVIEW").is_some() {
+            None
+        } else {
+            match ClashTray::new() {
+                Ok(tray) => match tray.show() {
+                    Ok(()) => Some(tray),
+                    Err(error) => {
+                        crate::log::error(format_args!(
+                            "显示系统托盘失败，继续运行主界面：{error}"
+                        ));
+                        None
+                    }
+                },
+                Err(error) => {
+                    crate::log::error(format_args!("创建系统托盘失败，继续运行主界面：{error}"));
+                    None
+                }
+            }
+        };
 
         let proxy_state = proxy::new_state();
         let rules_state = rules::new_state();
@@ -67,6 +84,7 @@ impl AppContext {
             root,
             start,
             main_window,
+            tray,
             proxy_state,
             rules_state,
             config_state,
@@ -77,8 +95,6 @@ impl AppContext {
             _connections_recorder: connections_recorder,
             _logs_recorder: logs_recorder,
             home_timer: slint::Timer::default(),
-            #[cfg(target_os = "linux")]
-            gtk_event_timer: slint::Timer::default(),
         })
     }
 
@@ -101,12 +117,10 @@ impl AppContext {
 
     pub(crate) fn start_services(&self) {
         speed_stats::start(&self.main_window);
-        tray::init(self.root.clone(), self.main_window.as_weak());
-        #[cfg(target_os = "linux")]
-        self.gtk_event_timer.start(
-            slint::TimerMode::Repeated,
-            Duration::from_millis(16),
-            tray::pump_gtk_events,
+        tray::init(
+            self.root.clone(),
+            self.main_window.as_weak(),
+            self.tray.as_ref(),
         );
         tray::restore_system_proxy();
     }

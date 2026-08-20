@@ -1,0 +1,101 @@
+// Slint 原生系统托盘：状态由 Rust 写入，动作通过回调交给业务层。
+export component ClashTray inherits SystemTrayIcon {
+    in property <bool> core-running: false;
+    in-out property <bool> rule-mode-checked: false;
+    in-out property <bool> global-mode-checked: false;
+    in-out property <bool> direct-mode-checked: false;
+    in-out property <bool> system-proxy: false;
+    in-out property <bool> tun-proxy: false;
+
+    property <image> gray-icon: @image-url("../assets/icons/gray.svg");
+    property <image> green-icon: @image-url("../assets/icons/green.svg");
+    property <image> blue-icon: @image-url("../assets/icons/blue.svg");
+    property <image> white-icon: @image-url("../assets/icons/white.svg");
+
+    icon: root.system-proxy
+        ? (root.tun-proxy ? root.white-icon : root.green-icon)
+        : (root.tun-proxy ? root.blue-icon : root.gray-icon);
+    tooltip: "Clash UI";
+    clicked => { show-main(); }
+
+    Menu {
+        MenuItem {
+            title: "显示主界面";
+            activated => { root.show-main(); }
+        }
+
+        MenuSeparator { }
+
+        Menu {
+            title: "复制环境变量";
+            enabled: root.core-running;
+
+            MenuItem {
+                title: "PowerShell";
+                enabled: root.core-running;
+                activated => { root.copy-env(0); }
+            }
+
+            MenuItem {
+                title: "CMD";
+                enabled: root.core-running;
+                activated => { root.copy-env(1); }
+            }
+
+            MenuItem {
+                title: "Bash";
+                enabled: root.core-running;
+                activated => { root.copy-env(2); }
+            }
+        }
+
+        Menu {
+            title: "出站模式";
+            enabled: root.core-running;
+
+            MenuItem {
+                title: root.rule-mode-checked ? "规则模式 ✓" : "规则模式";
+                enabled: root.core-running;
+                activated => { root.change-mode("rule"); }
+            }
+
+            MenuItem {
+                title: root.global-mode-checked ? "全局模式 ✓" : "全局模式";
+                enabled: root.core-running;
+                activated => { root.change-mode("global"); }
+            }
+
+            MenuItem {
+                title: root.direct-mode-checked ? "直连模式 ✓" : "直连模式";
+                enabled: root.core-running;
+                activated => { root.change-mode("direct"); }
+            }
+        }
+
+        MenuItem {
+            title: root.system-proxy ? "系统代理 ✓" : "系统代理";
+            enabled: root.core-running;
+            activated => { root.toggle-system-proxy(); }
+        }
+
+        MenuItem {
+            title: root.tun-proxy ? "TUN 代理 ✓" : "TUN 代理";
+            enabled: root.core-running;
+            activated => { root.toggle-tun(); }
+        }
+
+        MenuSeparator { }
+
+        MenuItem {
+            title: "退出";
+            activated => { root.quit(); }
+        }
+    }
+
+    callback show-main();
+    callback copy-env(int);
+    callback change-mode(string);
+    callback toggle-system-proxy();
+    callback toggle-tun();
+    callback quit();
+}

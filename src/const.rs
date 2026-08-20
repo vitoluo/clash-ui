@@ -87,26 +87,3 @@ pub(crate) const MAX_LOG_RECORDS: usize = 1000;
 
 pub(crate) const DEFAULT_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 pub(crate) const TEST_TIMEOUT_MS: u32 = 5000;
-
-pub(crate) const TRAY_ICONS: [&str; 4] = [
-    // 未设置代理
-    include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/icons/gray.svg"
-    )),
-    // 系统代理
-    include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/icons/green.svg"
-    )),
-    // TUN 代理
-    include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/icons/blue.svg"
-    )),
-    // 系统代理 + TUN 代理
-    include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/icons/white.svg"
-    )),
-];

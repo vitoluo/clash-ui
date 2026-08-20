@@ -1,25 +1,12 @@
-// 系统托盘：图标按 (系统代理, TUN) 四态切换，单击弹出三段菜单快捷控制。
-//
-// 设计要点：
-// - 菜单项句柄（CheckMenuItem）内部基于 Rc，非 Send/Sync，不可存入跨线程 static。
-//   本应用所有托盘动作均在主线程触发/执行，故用 thread_local 缓存句柄，
-//   事件分发闭包仅按 event.id 匹配、不捕获任何句柄（从而满足 Send+Sync 约束）。
-// - 动作函数导出供 task 008（主页同逻辑控件）复用。
+// 系统托盘：状态和菜单由 Slint SystemTrayIcon 管理，动作复用主页业务逻辑。
 
 use std::cell::RefCell;
 use std::path::PathBuf;
 
-use tray_icon::menu::{
-    CheckMenuItem, CheckMenuItemBuilder, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem,
-    MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder,
-};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-
 use crate::app::config;
 use crate::clash::{api, core};
-use crate::constants::TRAY_ICONS;
 use crate::platform;
-use crate::MainWindow;
+use crate::{ClashTray, MainWindow};
 use slint::ComponentHandle;
 
 /// 目标终端类型（决定复制的环境变量命令格式）。
@@ -45,53 +32,11 @@ pub(crate) struct ProxyEndpoint {
     pub(crate) ports: ProxyPorts,
 }
 
-// ===== 主线程局部缓存（句柄非 Send/Sync，仅主线程访问）=====
+// ===== 主线程局部缓存 =====
 thread_local! {
-    static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
-    static COPY_MENU: RefCell<Option<Submenu>> = const { RefCell::new(None) };
-    static COPY_ITEMS: RefCell<Option<[MenuItem; 3]>> = const { RefCell::new(None) };
-    static MODE_MENU: RefCell<Option<Submenu>> = const { RefCell::new(None) };
-    static MODE_ITEMS: RefCell<Option<[MenuItem; 3]>> = const { RefCell::new(None) };
-    static SYS_ITEM: RefCell<Option<CheckMenuItem>> = const { RefCell::new(None) };
-    static TUN_ITEM: RefCell<Option<CheckMenuItem>> = const { RefCell::new(None) };
-    static ICONS: RefCell<Option<[Vec<u8>; 4]>> = const { RefCell::new(None) };
+    static TRAY: RefCell<Option<slint::Weak<ClashTray>>> = const { RefCell::new(None) };
     static ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static WINDOW: RefCell<Option<slint::Weak<MainWindow>>> = const { RefCell::new(None) };
-}
-
-/// 当前图标索引：system 置位 0，tun 置位 1。顺序 [灰, 绿, 蓝, 白]。
-fn current_index() -> usize {
-    let s = config::get().proxy_status;
-    (s.system as usize) | ((s.tun as usize) << 1)
-}
-
-/// 将 RGBA 预乘像素还原为直 alpha（resvg/tiny_skia 输出为预乘）。
-fn unpremultiply(src: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len());
-    for chunk in src.chunks_exact(4) {
-        let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
-        if a == 255 || a == 0 {
-            out.extend_from_slice(chunk);
-        } else {
-            let inv = 255.0 / a as f32;
-            out.push((r as f32 * inv) as u8);
-            out.push((g as f32 * inv) as u8);
-            out.push((b as f32 * inv) as u8);
-            out.push(a);
-        }
-    }
-    out
-}
-
-/// 将 SVG 文本光栅化为 64×64 的 RGBA 字节（已去预乘）。
-fn rasterize(svg: &str) -> Option<Vec<u8>> {
-    let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).ok()?;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 64)?;
-    let scale = 64.0 / 512.0;
-    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-    let mut pixmap_mut = pixmap.as_mut();
-    resvg::render(&tree, transform, &mut pixmap_mut);
-    Some(unpremultiply(pixmap.data()))
 }
 
 /// 生成指定终端设置代理环境变量的命令。
@@ -182,83 +127,42 @@ pub(crate) fn proxy_endpoint() -> Result<ProxyEndpoint, String> {
     proxy_endpoint_from_configs(&configs)
 }
 
-/// 按当前状态刷新托盘图标。
-pub fn refresh_icon() {
-    let idx = current_index();
-    let rgba = ICONS.with(|i| i.borrow().as_ref().map(|a| a[idx].clone()));
-    if let Some(rgba) = rgba {
-        if let Ok(icon) = Icon::from_rgba(rgba, 64, 64) {
-            TRAY.with(|t| {
-                if let Some(tray) = t.borrow().as_ref() {
-                    let _ = tray.set_icon(Some(icon));
-                }
-            });
-        }
-    }
+fn tray() -> Option<ClashTray> {
+    TRAY.with(|tray| tray.borrow().as_ref().and_then(|weak| weak.upgrade()))
 }
 
 fn refresh_home_proxy_status() {
     let status = config::get().proxy_status;
-    SYS_ITEM.with(|item| {
-        if let Some(item) = item.borrow().as_ref() {
-            item.set_checked(status.system);
-        }
-    });
-    TUN_ITEM.with(|item| {
-        if let Some(item) = item.borrow().as_ref() {
-            item.set_checked(status.tun);
-        }
-    });
+    if let Some(tray) = tray() {
+        tray.set_system_proxy(status.system);
+        tray.set_tun_proxy(status.tun);
+    }
 
     let window = WINDOW.with(|w| w.borrow().clone().and_then(|weak| weak.upgrade()));
-    let Some(window) = window else {
-        return;
-    };
-
-    let home = window.global::<crate::HomeModel>();
-    home.set_system_proxy(status.system);
-    home.set_tun_proxy(status.tun);
-    home.set_core_running(core::get_port().is_some());
+    if let Some(window) = window {
+        let home = window.global::<crate::HomeModel>();
+        home.set_system_proxy(status.system);
+        home.set_tun_proxy(status.tun);
+        home.set_core_running(core::get_port().is_some());
+    }
     refresh_runtime_state();
 }
 
 /// 根据核心会话状态刷新主页和托盘代理操作的可用性。
 pub fn refresh_runtime_state() {
     let enabled = core::get_port().is_some();
-    COPY_MENU.with(|menu| {
-        if let Some(menu) = menu.borrow().as_ref() {
-            menu.set_enabled(enabled);
-        }
-    });
-    COPY_ITEMS.with(|items| {
-        if let Some(items) = items.borrow().as_ref() {
-            for item in items {
-                item.set_enabled(enabled);
-            }
-        }
-    });
-    MODE_MENU.with(|menu| {
-        if let Some(menu) = menu.borrow().as_ref() {
-            menu.set_enabled(enabled);
-        }
-    });
-    MODE_ITEMS.with(|items| {
-        if let Some(items) = items.borrow().as_ref() {
-            for item in items {
-                item.set_enabled(enabled);
-            }
-        }
-    });
-    SYS_ITEM.with(|item| {
-        if let Some(item) = item.borrow().as_ref() {
-            item.set_enabled(enabled);
-        }
-    });
-    TUN_ITEM.with(|item| {
-        if let Some(item) = item.borrow().as_ref() {
-            item.set_enabled(enabled);
-        }
-    });
+    if let Some(tray) = tray() {
+        tray.set_core_running(enabled);
+    }
+}
+
+/// 同步托盘当前出站模式。
+pub fn set_outbound_mode(mode: &str) {
+    if let Some(tray) = tray() {
+        tray.set_rule_mode_checked(mode == "rule");
+        tray.set_global_mode_checked(mode == "global");
+        tray.set_direct_mode_checked(mode == "direct");
+    }
 }
 
 /// 设置系统代理开关（平台动作成功后再写配置）。
@@ -279,11 +183,11 @@ pub fn set_system_proxy(enabled: bool) {
     };
     if let Err(error) = result {
         crate::log::error(format_args!("设置系统代理失败：{error}"));
+        refresh_home_proxy_status();
         return;
     }
     config::update(|c| c.proxy_status.system = enabled);
     refresh_home_proxy_status();
-    refresh_icon();
 }
 
 /// 按当前 Clash 配置恢复持久化的系统代理状态。
@@ -303,7 +207,7 @@ pub fn restore_system_proxy() {
     });
     if let Err(error) = result {
         crate::log::error(format_args!("启动时恢复系统代理失败：{error}"));
-        return;
+        config::update(|c| c.proxy_status.system = false);
     }
     refresh_home_proxy_status();
 }
@@ -318,7 +222,7 @@ pub fn toggle_system_proxy() {
     set_system_proxy(!config::get().proxy_status.system);
 }
 
-/// 设置 TUN 代理开关（写配置 + 重启核心注入 tun.enable + 同步勾选 + 刷新图标）。
+/// 设置 TUN 代理开关（写配置并重启核心注入 tun.enable）。
 pub fn set_tun(enabled: bool) {
     if enabled && !platform::is_admin() {
         WINDOW.with(|w| {
@@ -329,6 +233,7 @@ pub fn set_tun(enabled: bool) {
                     .set_tun_confirm_open(true);
             }
         });
+        refresh_home_proxy_status();
         return;
     }
 
@@ -340,7 +245,6 @@ pub fn set_tun(enabled: bool) {
         }
     }
     refresh_home_proxy_status();
-    refresh_icon();
 }
 
 /// 确认非管理员开启 TUN，失败时回滚配置并恢复系统代理。
@@ -375,7 +279,9 @@ pub fn set_mode(mode: &str) {
     }
     if let Err(e) = api::put_mode(mode) {
         crate::log::error(format_args!("设置出站模式 {mode} 失败: {e}"));
+        return;
     }
+    set_outbound_mode(mode);
 }
 
 /// 复制指定终端的代理环境变量命令到剪贴板。
@@ -416,33 +322,6 @@ pub fn show_main() {
     });
 }
 
-#[cfg(target_os = "linux")]
-fn initialize_gtk() -> bool {
-    if gtk::is_initialized_main_thread() {
-        return true;
-    }
-    if gtk::is_initialized() {
-        crate::log::error(format_args!("GTK 已在非主线程初始化，无法创建 Linux 托盘"));
-        return false;
-    }
-    if let Err(error) = gtk::init() {
-        crate::log::error(format_args!("初始化 GTK 托盘后端失败: {error}"));
-        return false;
-    }
-    true
-}
-
-/// 在 Slint/Winit 事件循环中处理 GTK 主上下文事件。
-#[cfg(target_os = "linux")]
-pub fn pump_gtk_events() {
-    if !gtk::is_initialized_main_thread() {
-        return;
-    }
-    while gtk::events_pending() {
-        gtk::main_iteration_do(false);
-    }
-}
-
 /// 退出：清除系统代理、停止核心并退出事件循环。
 pub fn quit() {
     if config::get().proxy_status.system {
@@ -454,229 +333,32 @@ pub fn quit() {
     let _ = slint::quit_event_loop();
 }
 
-/// 初始化托盘：光栅化图标、构建菜单、注册事件分发。须在 Slint 主线程调用。
-pub fn init(root: PathBuf, window: slint::Weak<MainWindow>) {
-    #[cfg(target_os = "linux")]
-    if !initialize_gtk() {
-        return;
-    }
+/// 初始化 Slint 系统托盘。托盘不可用时仍保留 root/window 状态，确保主界面业务可用。
+pub fn init(root: PathBuf, window: slint::Weak<MainWindow>, tray: Option<&ClashTray>) {
+    ROOT.with(|value| *value.borrow_mut() = Some(root));
+    WINDOW.with(|value| *value.borrow_mut() = Some(window));
 
-    let Some(init_icon) = load_icons() else {
-        return;
-    };
-    let (menu, handles) = build_menu(config::get().proxy_status);
-    let Some(tray) = create_tray(menu, init_icon) else {
+    let Some(tray) = tray else {
+        refresh_home_proxy_status();
         return;
     };
-    cache_handles(root, window, tray, handles);
-    register_menu_events();
-    refresh_runtime_state();
-}
 
-fn load_icons() -> Option<Icon> {
-    let mut rgba_icons: [Vec<u8>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-    for (i, svg) in TRAY_ICONS.iter().enumerate() {
-        match rasterize(svg) {
-            Some(rgba) => rgba_icons[i] = rgba,
-            None => crate::log::error(format_args!("光栅化托盘图标 {i} 失败")),
-        }
+    TRAY.with(|value| *value.borrow_mut() = Some(tray.as_weak()));
+    tray.on_show_main(show_main);
+    tray.on_copy_env(|index| match index {
+        0 => copy_proxy_env(Terminal::PowerShell),
+        1 => copy_proxy_env(Terminal::Cmd),
+        2 => copy_proxy_env(Terminal::Bash),
+        _ => crate::log::error(format_args!("未知的终端类型索引：{index}")),
+    });
+    tray.on_change_mode(|mode| set_mode(mode.as_str()));
+    tray.on_toggle_system_proxy(toggle_system_proxy);
+    tray.on_toggle_tun(toggle_tun);
+    tray.on_quit(quit);
+    refresh_home_proxy_status();
+    if let Ok(configs) = api::get_configs() {
+        set_outbound_mode(&configs.mode);
     }
-    ICONS.with(|i| *i.borrow_mut() = Some(rgba_icons.clone()));
-
-    // 2. 初始图标（光栅化失败时回退到灰图标）。
-    let idx = current_index();
-    let init_rgba = if rgba_icons[idx].len() == 64 * 64 * 4 {
-        rgba_icons[idx].clone()
-    } else {
-        rgba_icons[0].clone()
-    };
-    let init_icon = match Icon::from_rgba(init_rgba, 64, 64) {
-        Ok(icon) => icon,
-        Err(e) => {
-            crate::log::error(format_args!("构造初始托盘图标失败: {e}"));
-            return None;
-        }
-    };
-    Some(init_icon)
-}
-
-fn build_copy_menu() -> (Submenu, [MenuItem; 3]) {
-    let copy_ps = MenuItemBuilder::new()
-        .id(MenuId::new("copy_ps"))
-        .text("PowerShell")
-        .enabled(true)
-        .build();
-    let copy_cmd = MenuItemBuilder::new()
-        .id(MenuId::new("copy_cmd"))
-        .text("CMD")
-        .enabled(true)
-        .build();
-    let copy_bash = MenuItemBuilder::new()
-        .id(MenuId::new("copy_bash"))
-        .text("Bash")
-        .enabled(true)
-        .build();
-    let items = [copy_ps, copy_cmd, copy_bash];
-    let item_refs: Vec<&dyn IsMenuItem> =
-        items.iter().map(|item| item as &dyn IsMenuItem).collect();
-    let submenu = SubmenuBuilder::new()
-        .id(MenuId::new("copy_env"))
-        .text("复制环境变量")
-        .enabled(true)
-        .items(&item_refs)
-        .build()
-        .expect("构建复制环境变量子菜单失败");
-    (submenu, items)
-}
-
-fn build_mode_menu() -> (Submenu, [MenuItem; 3]) {
-    let mode_rule = MenuItemBuilder::new()
-        .id(MenuId::new("mode_rule"))
-        .text("规则模式")
-        .enabled(true)
-        .build();
-    let mode_global = MenuItemBuilder::new()
-        .id(MenuId::new("mode_global"))
-        .text("全局模式")
-        .enabled(true)
-        .build();
-    let mode_direct = MenuItemBuilder::new()
-        .id(MenuId::new("mode_direct"))
-        .text("直连模式")
-        .enabled(true)
-        .build();
-    let items = [mode_rule, mode_global, mode_direct];
-    let item_refs: Vec<&dyn IsMenuItem> =
-        items.iter().map(|item| item as &dyn IsMenuItem).collect();
-    let submenu = SubmenuBuilder::new()
-        .id(MenuId::new("mode"))
-        .text("出站模式")
-        .enabled(true)
-        .items(&item_refs)
-        .build()
-        .expect("构建出站模式子菜单失败");
-    (submenu, items)
-}
-
-struct MenuHandles {
-    copy_menu: Submenu,
-    copy_items: [MenuItem; 3],
-    mode_menu: Submenu,
-    mode_items: [MenuItem; 3],
-    sys: CheckMenuItem,
-    tun: CheckMenuItem,
-}
-
-fn build_menu(status: config::ProxyStatus) -> (Menu, MenuHandles) {
-    let runtime_enabled = core::get_port().is_some();
-    let show = MenuItemBuilder::new()
-        .id(MenuId::new("show_main"))
-        .text("显示主界面")
-        .enabled(true)
-        .build();
-
-    let sep1 = PredefinedMenuItem::separator();
-    let (copy_env, copy_items) = build_copy_menu();
-    let (mode, mode_items) = build_mode_menu();
-
-    let sys = CheckMenuItemBuilder::new()
-        .id(MenuId::new("system_proxy"))
-        .text("系统代理")
-        .enabled(runtime_enabled)
-        .checked(status.system)
-        .build();
-    let tun = CheckMenuItemBuilder::new()
-        .id(MenuId::new("tun_proxy"))
-        .text("TUN 代理")
-        .enabled(runtime_enabled)
-        .checked(status.tun)
-        .build();
-
-    let sep2 = PredefinedMenuItem::separator();
-
-    let quit_item = MenuItemBuilder::new()
-        .id(MenuId::new("quit"))
-        .text("退出")
-        .enabled(true)
-        .build();
-
-    let menu = Menu::new();
-    let items: Vec<&dyn IsMenuItem> = vec![
-        &show, &sep1, &copy_env, &mode, &sys, &tun, &sep2, &quit_item,
-    ];
-    menu.append_items(&items).expect("追加托盘菜单项失败");
-    (
-        menu,
-        MenuHandles {
-            copy_menu: copy_env,
-            copy_items,
-            mode_menu: mode,
-            mode_items,
-            sys,
-            tun,
-        },
-    )
-}
-
-fn create_tray(menu: Menu, icon: Icon) -> Option<TrayIcon> {
-    match TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_icon(icon)
-        .with_tooltip("Clash UI")
-        .with_menu_on_left_click(true)
-        .build()
-    {
-        Ok(tray) => Some(tray),
-        Err(e) => {
-            crate::log::error(format_args!("创建托盘失败: {e}"));
-            None
-        }
-    }
-}
-
-fn cache_handles(
-    root: PathBuf,
-    window: slint::Weak<MainWindow>,
-    tray: TrayIcon,
-    handles: MenuHandles,
-) {
-    let MenuHandles {
-        copy_menu,
-        copy_items,
-        mode_menu,
-        mode_items,
-        sys,
-        tun,
-    } = handles;
-    TRAY.with(|t| *t.borrow_mut() = Some(tray));
-    COPY_MENU.with(|m| *m.borrow_mut() = Some(copy_menu));
-    COPY_ITEMS.with(|i| *i.borrow_mut() = Some(copy_items));
-    MODE_MENU.with(|m| *m.borrow_mut() = Some(mode_menu));
-    MODE_ITEMS.with(|i| *i.borrow_mut() = Some(mode_items));
-    SYS_ITEM.with(|s| *s.borrow_mut() = Some(sys));
-    TUN_ITEM.with(|t| *t.borrow_mut() = Some(tun));
-    ROOT.with(|r| *r.borrow_mut() = Some(root));
-    WINDOW.with(|w| *w.borrow_mut() = Some(window));
-}
-
-fn register_menu_events() {
-    MenuEvent::set_event_handler(Some(|event: MenuEvent| match event.id.as_ref() {
-        "show_main" => show_main(),
-        "copy_ps" => copy_proxy_env(Terminal::PowerShell),
-        "copy_cmd" => copy_proxy_env(Terminal::Cmd),
-        "copy_bash" => copy_proxy_env(Terminal::Bash),
-        "mode_rule" => set_mode("rule"),
-        "mode_global" => set_mode("global"),
-        "mode_direct" => set_mode("direct"),
-        "system_proxy" => {
-            let _ = slint::invoke_from_event_loop(toggle_system_proxy);
-        }
-        "tun_proxy" => {
-            let _ = slint::invoke_from_event_loop(toggle_tun);
-        }
-        "quit" => quit(),
-        _ => {}
-    }));
 }
 
 #[cfg(test)]
