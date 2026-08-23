@@ -4,7 +4,7 @@ use std::time::Instant;
 use slint::{ComponentHandle, LogicalPosition, LogicalSize};
 
 use super::{app_bindings, config};
-use crate::clash::{api, core};
+use crate::clash::{core, stream};
 use crate::controller::{
     config as config_page, connections, home, logs, proxy, r#override as override_page, rules,
     settings, speed_stats, tray,
@@ -32,8 +32,9 @@ pub(crate) struct AppContext {
 impl AppContext {
     pub(crate) fn new(root: PathBuf, start: Instant) -> Result<Self, Box<dyn std::error::Error>> {
         let connections_recorder =
-            connections::start_recorder(api::conns_rx().expect("连接广播发送端初始化失败"));
-        let logs_recorder = logs::start_recorder(api::logs_rx().expect("日志广播发送端初始化失败"));
+            connections::start_recorder(stream::conns_rx().expect("连接广播发送端初始化失败"));
+        let logs_recorder =
+            logs::start_recorder(stream::logs_rx().expect("日志广播发送端初始化失败"));
 
         let main_window = MainWindow::new()?;
         connections::attach_ui(&connections_recorder, main_window.as_weak());
@@ -68,8 +69,9 @@ impl AppContext {
         let logs_state = logs_recorder.state();
         let settings_state = settings::new_state(root.clone());
         settings::refresh(&main_window, &settings_state);
-        register_core_stop_cleanup(
+        register_core_lifecycle_handlers(
             &main_window,
+            start,
             proxy_state.clone(),
             rules_state.clone(),
             connections_state.clone(),
@@ -122,11 +124,10 @@ impl AppContext {
             self.main_window.as_weak(),
             self.tray.as_ref(),
         );
-        tray::restore_system_proxy();
     }
 
     pub(crate) fn show_and_run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if !config::get().settings.app.silent_start {
+        if !config::settings().app.silent_start {
             self.main_window.show()?;
         }
         slint::run_event_loop_until_quit()?;
@@ -134,15 +135,22 @@ impl AppContext {
     }
 }
 
-fn register_core_stop_cleanup(
+fn register_core_lifecycle_handlers(
     window: &MainWindow,
+    start: Instant,
     proxy_state: proxy::SharedProxyState,
     rules_state: rules::SharedRulesState,
     connections_state: connections::SharedConnectionsState,
     logs_state: logs::SharedLogsState,
 ) {
+    core::set_ready_handler(tray::restore_system_proxy);
     let weak = window.as_weak();
     core::set_stop_handler(move || {
+        if config::get().proxy_status.system {
+            if let Err(error) = tray::clear_system_proxy() {
+                crate::log::error(format_args!("核心停止时清除系统代理失败：{error}"));
+            }
+        }
         proxy::clear_runtime(&proxy_state);
         rules::clear_runtime(&rules_state);
         connections::clear_runtime(&connections_state);
@@ -161,6 +169,7 @@ fn register_core_stop_cleanup(
             rules::sync_ui(&window, &rules_state);
             connections::sync_ui(&window, &connections_state);
             logs::sync_ui(&window, &logs_state);
+            home::refresh(&window, &start);
         }) {
             crate::log::error(format_args!("核心停止后清理页面数据失败：{error}"));
         }

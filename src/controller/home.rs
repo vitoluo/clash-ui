@@ -2,18 +2,20 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Timer};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::app::config;
-use crate::clash::{api, core};
+use crate::clash::{api, core, stream};
 use crate::constants::RUNTIME_UI_DIR;
 use crate::controller::tray;
 use crate::{platform, MainWindow};
+
+const HOME_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 struct CoreUpgradeGuard {
     active: Arc<AtomicBool>,
@@ -34,6 +36,77 @@ impl Drop for CoreUpgradeGuard {
     }
 }
 
+struct HomeMetricsSampler {
+    system: Mutex<System>,
+    pending: AtomicBool,
+    sampled: AtomicBool,
+    latest_rss: AtomicU64,
+}
+
+impl HomeMetricsSampler {
+    fn new() -> Self {
+        Self {
+            system: Mutex::new(System::new()),
+            pending: AtomicBool::new(false),
+            sampled: AtomicBool::new(false),
+            latest_rss: AtomicU64::new(0),
+        }
+    }
+
+    fn request(self: &Arc<Self>, weak: slint::Weak<MainWindow>) {
+        if !self.try_begin() {
+            return;
+        }
+        let sampler = self.clone();
+        crate::runtime::spawn_blocking(move || {
+            let pid = Pid::from_u32(std::process::id());
+            let rss = {
+                let mut system = sampler
+                    .system
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+                system
+                    .process(pid)
+                    .map(|process| process.memory())
+                    .unwrap_or(0)
+            };
+            sampler.latest_rss.store(rss, Ordering::Release);
+            sampler.sampled.store(true, Ordering::Release);
+            sampler.finish();
+            if let Err(error) = slint::invoke_from_event_loop(move || {
+                let Some(window) = weak.upgrade() else { return };
+                if home_is_visible(window.global::<crate::AppState>().get_current_page()) {
+                    window
+                        .global::<crate::HomeModel>()
+                        .set_client_mem(fmt_mb(rss).into());
+                }
+            }) {
+                crate::log::error(format_args!("投递客户端内存刷新任务失败：{error}"));
+            }
+        });
+    }
+
+    fn try_begin(&self) -> bool {
+        !self.pending.swap(true, Ordering::AcqRel)
+    }
+
+    fn finish(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
+static METRICS_SAMPLER: OnceLock<Arc<HomeMetricsSampler>> = OnceLock::new();
+static STATIC_REFRESH_TOKEN: AtomicU64 = AtomicU64::new(0);
+
+fn metrics_sampler() -> &'static Arc<HomeMetricsSampler> {
+    METRICS_SAMPLER.get_or_init(|| Arc::new(HomeMetricsSampler::new()))
+}
+
+fn home_is_visible(page: i32) -> bool {
+    page == 0
+}
+
 fn set_toast(window: &MainWindow, message: &str, variant: i32) {
     let model = window.global::<crate::HomeModel>();
     model.set_toast_message(message.to_string().into());
@@ -42,6 +115,9 @@ fn set_toast(window: &MainWindow, message: &str, variant: i32) {
 }
 
 pub(crate) fn bind_callbacks(window: &MainWindow, root: PathBuf, start: Instant, timer: &Timer) {
+    let home = window.global::<crate::HomeModel>();
+    home.set_platform_name(platform::platform_name().into());
+    home.set_client_version(env!("CARGO_PKG_VERSION").into());
     bind_mode_and_proxy(window, start);
     bind_core(window, root.clone(), start);
     bind_online_panel(window, root);
@@ -101,12 +177,20 @@ fn bind_core(window: &MainWindow, root: PathBuf, start: Instant) {
         let weak = weak.clone();
         let root = root.clone();
         move || {
-            if let Err(error) = core::restart_core(&root) {
-                crate::log::error(format_args!("重启 clash 核心失败: {error}"));
-            }
-            if let Some(window) = weak.upgrade() {
-                refresh(&window, &start);
-            }
+            let weak = weak.clone();
+            let root = root.clone();
+            crate::runtime::spawn_blocking(move || {
+                if let Err(error) = core::restart_core(&root) {
+                    crate::log::error(format_args!("重启 clash 核心失败: {error}"));
+                }
+                if let Err(error) = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = weak.upgrade() {
+                        refresh(&window, &start);
+                    }
+                }) {
+                    crate::log::error(format_args!("投递核心重启刷新任务失败：{error}"));
+                }
+            });
         }
     });
     window.global::<crate::HomeModel>().on_update_core({
@@ -120,35 +204,25 @@ fn bind_core(window: &MainWindow, root: PathBuf, start: Instant) {
                 window.global::<crate::HomeModel>().set_core_updating(true);
             }
             let weak = weak.clone();
-            let spawn_failure_weak = weak.clone();
             let task_start = start;
-            let task = std::thread::Builder::new()
-                .name("core-upgrade".to_string())
-                .spawn(move || {
-                    let _guard = guard;
-                    let update_error = api::upgrade().err().map(|error| {
-                        crate::log::error(format_args!("更新 clash 核心失败: {error}"));
-                        format!("更新核心失败：{error}")
-                    });
-                    if let Err(error) = slint::invoke_from_event_loop(move || {
-                        if let Some(window) = weak.upgrade() {
-                            window.global::<crate::HomeModel>().set_core_updating(false);
-                            if let Some(error) = update_error {
-                                set_toast(&window, &error, 2);
-                            }
-                            refresh(&window, &task_start);
-                        }
-                    }) {
-                        crate::log::error(format_args!("投递核心更新刷新任务失败：{error}"));
-                    }
+            crate::runtime::spawn_blocking(move || {
+                let _guard = guard;
+                let update_error = api::upgrade().err().map(|error| {
+                    crate::log::error(format_args!("更新 clash 核心失败: {error}"));
+                    format!("更新核心失败：{error}")
                 });
-            if let Err(error) = task {
-                crate::log::error(format_args!("启动核心更新任务失败：{error}"));
-                if let Some(window) = spawn_failure_weak.upgrade() {
-                    window.global::<crate::HomeModel>().set_core_updating(false);
-                    set_toast(&window, &format!("更新核心失败：{error}"), 2);
+                if let Err(error) = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = weak.upgrade() {
+                        window.global::<crate::HomeModel>().set_core_updating(false);
+                        if let Some(error) = update_error {
+                            set_toast(&window, &error, 2);
+                        }
+                        refresh(&window, &task_start);
+                    }
+                }) {
+                    crate::log::error(format_args!("投递核心更新刷新任务失败：{error}"));
                 }
-            }
+            });
         }
     });
 }
@@ -158,23 +232,18 @@ fn bind_online_panel(window: &MainWindow, root: PathBuf) {
         .global::<crate::HomeModel>()
         .on_open_online_panel(move || {
             let task_root = root.clone();
-            let task = std::thread::Builder::new()
-                .name("online-panel-download".to_string())
-                .spawn(move || match prepare_online_panel(&task_root) {
-                    Ok(url) => {
-                        if let Err(error) = slint::invoke_from_event_loop(move || {
-                            if let Err(error) = platform::open_url(&url) {
-                                crate::log::error(format_args!("打开在线面板失败：{error}"));
-                            }
-                        }) {
-                            crate::log::error(format_args!("投递在线面板打开任务失败：{error}"));
+            crate::runtime::spawn_blocking(move || match prepare_online_panel(&task_root) {
+                Ok(url) => {
+                    if let Err(error) = slint::invoke_from_event_loop(move || {
+                        if let Err(error) = platform::open_url(&url) {
+                            crate::log::error(format_args!("打开在线面板失败：{error}"));
                         }
+                    }) {
+                        crate::log::error(format_args!("投递在线面板打开任务失败：{error}"));
                     }
-                    Err(error) => crate::log::error(format_args!("准备在线面板失败：{error}")),
-                });
-            if let Err(error) = task {
-                crate::log::error(format_args!("启动在线面板任务失败：{error}"));
-            }
+                }
+                Err(error) => crate::log::error(format_args!("准备在线面板失败：{error}")),
+            });
         });
 }
 
@@ -182,13 +251,11 @@ fn bind_timer(window: &MainWindow, timer: &Timer, start: Instant) {
     let weak = window.as_weak();
     timer.start(
         slint::TimerMode::Repeated,
-        Duration::from_secs(2),
+        HOME_REFRESH_INTERVAL,
         move || {
             if let Some(window) = weak.upgrade() {
-                if window.global::<crate::AppState>().get_current_page() == 0 {
-                    refresh(&window, &start);
-                } else {
-                    refresh_runtime_state(&window);
+                if home_is_visible(window.global::<crate::AppState>().get_current_page()) {
+                    refresh_dynamic(&window, &start);
                 }
             }
         },
@@ -209,21 +276,11 @@ fn format_uptime(duration: Duration) -> String {
     format!("{hours}:{minutes:02}:{seconds:02}")
 }
 
-/// 当前进程常驻内存（字节）。
-fn client_rss() -> u64 {
-    let system = System::new_all();
-    let pid = Pid::from_u32(std::process::id());
-    system
-        .process(pid)
-        .map(|process| process.memory())
-        .unwrap_or(0)
-}
-
 /// 刷新主页和托盘的核心运行态，不请求 Clash API。
 pub fn refresh_runtime_state(main_window: &MainWindow) {
     main_window
         .global::<crate::HomeModel>()
-        .set_core_running(core::get_port().is_some());
+        .set_core_running(core::is_ready());
     tray::refresh_runtime_state();
 }
 
@@ -232,58 +289,97 @@ fn proxy_address(endpoint: &tray::ProxyEndpoint) -> String {
     tray::proxy_address(endpoint).unwrap_or_else(|| "—".to_string())
 }
 
-/// 刷新主页展示数据。
-pub fn refresh(main_window: &MainWindow, start: &Instant) {
+/// 刷新首页每秒变化的指标，不执行 HTTP 或全系统扫描。
+pub fn refresh_dynamic(main_window: &MainWindow, start: &Instant) {
     let home = main_window.global::<crate::HomeModel>();
     refresh_runtime_state(main_window);
-    home.set_platform_name(platform::platform_name().into());
-
-    let configs = api::get_configs();
-    let endpoint = configs
-        .as_ref()
-        .ok()
-        .and_then(|configs| tray::proxy_endpoint_from_configs(configs).ok());
-    let proxy_address = endpoint
-        .as_ref()
-        .map(proxy_address)
-        .unwrap_or_else(|| "—".to_string());
-    home.set_proxy_address(proxy_address.into());
-
-    if let Ok(configs) = configs {
-        let mode = match configs.mode.as_str() {
-            "rule" => "规则模式",
-            "global" => "全局模式",
-            "direct" => "直连模式",
-            _ => "—",
-        };
-        home.set_outbound_mode(mode.into());
-        tray::set_outbound_mode(&configs.mode);
+    let sampler = metrics_sampler();
+    if sampler.sampled.load(Ordering::Acquire) {
+        home.set_client_mem(fmt_mb(sampler.latest_rss.load(Ordering::Acquire)).into());
     }
-
-    let proxy_status = config::get().proxy_status;
-    home.set_system_proxy(proxy_status.system);
-    home.set_tun_proxy(proxy_status.tun);
-    home.set_core_running(core::get_port().is_some());
-    home.set_core_version(
-        api::get_version()
-            .map(|version| version.version)
-            .unwrap_or_else(|_| "—".to_string())
-            .into(),
-    );
-    home.set_client_mem(fmt_mb(client_rss()).into());
     home.set_core_mem(
-        api::latest_memory()
+        stream::latest_memory()
             .map(|snapshot| fmt_mb(snapshot.inuse))
             .unwrap_or_else(|| "—".to_string())
             .into(),
     );
     home.set_uptime(format_uptime(start.elapsed()).into());
-    home.set_client_version(env!("CARGO_PKG_VERSION").into());
+    sampler.request(main_window.as_weak());
+}
 
-    let panel_url = core::get_controller_snapshot()
-        .map(|snapshot| zashboard_url(&snapshot))
-        .unwrap_or_default();
-    home.set_zashboard_url(panel_url.into());
+/// 异步刷新核心版本、模式和代理地址，过期响应不会覆盖新会话。
+pub fn refresh_static(weak: slint::Weak<MainWindow>) {
+    let token = STATIC_REFRESH_TOKEN
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    let core_ready = core::is_ready();
+    if let Some(window) = weak.upgrade() {
+        let home = window.global::<crate::HomeModel>();
+        let proxy_status = config::proxy_status();
+        home.set_system_proxy(proxy_status.system);
+        home.set_tun_proxy(proxy_status.tun);
+        let panel_url = if core_ready {
+            core::get_controller_snapshot()
+                .map(|snapshot| zashboard_url(&snapshot))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        home.set_zashboard_url(panel_url.into());
+        if !core_ready {
+            home.set_outbound_mode("—".into());
+            home.set_proxy_address("—".into());
+            home.set_core_version("—".into());
+            tray::set_outbound_mode("");
+        }
+    }
+    if !core_ready {
+        return;
+    }
+
+    crate::runtime::spawn_blocking(move || {
+        let configs = api::get_configs();
+        let version = api::get_version()
+            .map(|version| version.version)
+            .unwrap_or_else(|_| "—".to_string());
+        if let Err(error) = slint::invoke_from_event_loop(move || {
+            if STATIC_REFRESH_TOKEN.load(Ordering::Acquire) != token {
+                return;
+            }
+            let Some(window) = weak.upgrade() else { return };
+            let home = window.global::<crate::HomeModel>();
+            let endpoint = configs
+                .as_ref()
+                .ok()
+                .and_then(|configs| tray::proxy_endpoint_from_configs(configs).ok());
+            home.set_proxy_address(
+                endpoint
+                    .as_ref()
+                    .map(proxy_address)
+                    .unwrap_or_else(|| "—".to_string())
+                    .into(),
+            );
+            if let Ok(configs) = configs {
+                let mode = match configs.mode.as_str() {
+                    "rule" => "规则模式",
+                    "global" => "全局模式",
+                    "direct" => "直连模式",
+                    _ => "—",
+                };
+                home.set_outbound_mode(mode.into());
+                tray::set_outbound_mode(&configs.mode);
+            }
+            home.set_core_version(version.into());
+        }) {
+            crate::log::error(format_args!("投递首页静态刷新任务失败：{error}"));
+        }
+    });
+}
+
+/// 页面进入或运行态变化时立即刷新动态指标并提交静态请求。
+pub fn refresh(main_window: &MainWindow, start: &Instant) {
+    refresh_dynamic(main_window, start);
+    refresh_static(main_window.as_weak());
 }
 
 /// 根据当前核心控制会话构造完整的 zashboard URL。
@@ -366,6 +462,23 @@ mod tests {
 
         drop(first);
         assert!(CoreUpgradeGuard::try_acquire(active).is_some());
+    }
+
+    #[test]
+    fn homepage_visibility_and_refresh_interval_follow_dynamic_contract() {
+        assert!(home_is_visible(0));
+        assert!(!home_is_visible(1));
+        assert_eq!(HOME_REFRESH_INTERVAL, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn metrics_sampler_coalesces_pending_requests() {
+        let sampler = HomeMetricsSampler::new();
+        assert!(sampler.try_begin());
+        assert!(!sampler.try_begin());
+        sampler.finish();
+        assert!(sampler.try_begin());
+        sampler.finish();
     }
 
     fn tmp_root(name: &str) -> PathBuf {

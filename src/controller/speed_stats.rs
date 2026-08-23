@@ -26,7 +26,7 @@ pub fn start(window: &MainWindow) {
         <SpeedModel<'_> as slint::Global<'_, MainWindow>>::as_weak(&speed_model);
 
     // 核心尚未启动也可能已能订阅（broadcast 发送端常驻），返回 None 时直接退出。
-    let Some(mut rx) = crate::clash::api::traffic_rx() else {
+    let Some(mut rx) = crate::clash::stream::traffic_rx() else {
         return;
     };
 
@@ -36,7 +36,7 @@ pub fn start(window: &MainWindow) {
 
         loop {
             // 在全局 tokio runtime 上阻塞接收下一帧流量。
-            let traffic = match crate::clash::api::block(async { rx.recv().await }) {
+            let traffic = match crate::runtime::block(async { rx.recv().await }) {
                 Ok(t) => t,
                 // lagged/closed 等异常：继续下一个循环。
                 Err(_) => continue,

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use slint::{ComponentHandle, ModelRc, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 
 use crate::app::config::{self, ConfigEntry, SourceType};
 use crate::clash::core;
@@ -26,6 +26,9 @@ pub struct ConfigViewState {
 pub type SharedConfigState = Arc<Mutex<ConfigViewState>>;
 
 pub(crate) fn bind_callbacks(window: &MainWindow, state: SharedConfigState) {
+    window
+        .global::<crate::ConfigModel>()
+        .set_configs(ModelRc::new(VecModel::default()));
     bind_item_callbacks(window, state.clone());
     bind_form_callbacks(window, state.clone());
     bind_runtime_callbacks(window, state);
@@ -144,10 +147,36 @@ fn display_name(entry: &ConfigEntry) -> String {
 
 fn set_ui_model(window: &MainWindow, state: &ConfigViewState, entries: &[ConfigEntry]) {
     let model = window.global::<crate::ConfigModel>();
-    model.set_configs(ModelRc::new(VecModel::from(config_rows(entries))));
+    let rows = config_rows(entries);
+    let current = model.get_configs();
+    if let Some(rows_model) = current.as_any().downcast_ref::<VecModel<ConfigRow>>() {
+        sync_rows(rows_model, rows);
+    } else {
+        model.set_configs(ModelRc::new(VecModel::from(rows)));
+    }
+    set_ui_state(window, state);
+}
+
+fn set_ui_state(window: &MainWindow, state: &ConfigViewState) {
+    let model = window.global::<crate::ConfigModel>();
     model.set_loading(state.loading);
     model.set_busy(state.busy);
     model.set_error(state.error.clone().into());
+}
+
+fn sync_rows(model: &VecModel<ConfigRow>, rows: Vec<ConfigRow>) {
+    let common = model.row_count().min(rows.len());
+    for (index, row) in rows.iter().take(common).cloned().enumerate() {
+        if model.row_data(index).as_ref() != Some(&row) {
+            model.set_row_data(index, row);
+        }
+    }
+    while model.row_count() > rows.len() {
+        model.remove(model.row_count() - 1);
+    }
+    for row in rows.into_iter().skip(common) {
+        model.push(row);
+    }
 }
 
 fn set_toast(window: &MainWindow, message: &str, variant: i32) {
@@ -168,33 +197,16 @@ where
 
 /// 从 app.yaml 快照刷新配置卡片，不轮询外部服务。
 pub fn refresh_async(weak: Weak<MainWindow>, state: SharedConfigState) {
-    let token = {
-        let mut view = lock_state(&state);
-        if view.busy {
-            return;
-        }
-        let token = next_token(&mut view);
-        view.refresh_token = token;
-        view.loading = true;
-        view.error.clear();
-        if let Some(window) = weak.upgrade() {
-            set_ui_model(&window, &view, &config::get().configs);
-        }
-        token
-    };
-
-    std::thread::spawn(move || {
-        let snapshot = config::get();
-        invoke_ui(move || {
-            let Some(window) = weak.upgrade() else { return };
-            let mut view = lock_state(&state);
-            if view.refresh_token != token {
-                return;
-            }
-            view.loading = false;
-            set_ui_model(&window, &view, &snapshot.configs);
-        });
-    });
+    let mut view = lock_state(&state);
+    if view.busy {
+        return;
+    }
+    view.refresh_token = next_token(&mut view);
+    view.loading = false;
+    view.error.clear();
+    if let Some(window) = weak.upgrade() {
+        set_ui_model(&window, &view, &config::configs());
+    }
 }
 
 fn begin_operation(weak: &Weak<MainWindow>, state: &SharedConfigState) -> Option<u64> {
@@ -207,7 +219,7 @@ fn begin_operation(weak: &Weak<MainWindow>, state: &SharedConfigState) -> Option
     view.busy = true;
     view.error.clear();
     if let Some(window) = weak.upgrade() {
-        set_ui_model(&window, &view, &config::get().configs);
+        set_ui_state(&window, &view);
     }
     Some(token)
 }
@@ -240,8 +252,13 @@ fn finish_operation(
                 set_toast(&window, &message, 2);
             }
         }
-        set_ui_model(&window, &view, &config::get().configs);
+        if success {
+            set_ui_model(&window, &view, &config::configs());
+        } else {
+            set_ui_state(&window, &view);
+        }
         home::refresh_runtime_state(&window);
+        home::refresh_static(window.as_weak());
         if !success && close_form {
             window.global::<crate::ConfigModel>().set_form_open(true);
         }
@@ -264,8 +281,7 @@ pub fn edit(weak: Weak<MainWindow>, state: SharedConfigState, path: String) {
     if lock_state(&state).busy {
         return;
     }
-    let entry = config::get()
-        .configs
+    let entry = config::configs()
         .into_iter()
         .find(|entry| entry.path == path);
     let Some(entry) = entry else {
@@ -302,7 +318,7 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedConfigState) {
     let Some(token) = begin_operation(&weak, &state) else {
         return;
     };
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = platform::pick_config_file().and_then(|path| match path {
             Some(path) if path.is_file() => Ok(Some(path)),
             Some(_) => Err("选择的路径不是文件".to_string()),
@@ -327,7 +343,7 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedConfigState) {
                     set_toast(&window, &error, 2);
                 }
             }
-            set_ui_model(&window, &view, &config::get().configs);
+            set_ui_state(&window, &view);
         });
     });
 }
@@ -338,9 +354,9 @@ pub fn toggle_enabled(weak: Weak<MainWindow>, state: SharedConfigState, path: St
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
-        let snapshot = config::get();
-        let Some(target) = snapshot.configs.iter().find(|entry| entry.path == path) else {
+    crate::runtime::spawn_blocking(move || {
+        let configs = config::configs();
+        let Some(target) = configs.iter().find(|entry| entry.path == path) else {
             finish_operation(
                 weak,
                 state,
@@ -388,7 +404,7 @@ pub fn submit_form(
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = save_entry(&root, &editing_path, &name, &source_type, &source_uri)
             .map(|_| "配置已保存".to_string())
             .map_err(|error| format!("保存配置失败：{error}"));
@@ -402,7 +418,7 @@ pub fn update(weak: Weak<MainWindow>, state: SharedConfigState, path: String) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = update_entry(&root, &path)
             .map(|_| "配置已更新".to_string())
             .map_err(|error| format!("更新配置失败：{error}"));
@@ -416,7 +432,7 @@ pub fn delete(weak: Weak<MainWindow>, state: SharedConfigState, path: String) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = delete_entry(&root, &path)
             .map(|_| "配置已删除".to_string())
             .map_err(|error| format!("删除配置失败：{error}"));
@@ -430,7 +446,7 @@ pub fn view_runtime(weak: Weak<MainWindow>, state: SharedConfigState) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = fs::read_to_string(root.join(RUNTIME_DIR).join("config.yaml"))
             .map_err(|error| format!("读取运行配置失败：{error}"));
         invoke_ui(move || {
@@ -452,7 +468,7 @@ pub fn view_runtime(weak: Weak<MainWindow>, state: SharedConfigState) {
                     set_toast(&window, &error, 2);
                 }
             }
-            set_ui_model(&window, &view, &config::get().configs);
+            set_ui_state(&window, &view);
         });
     });
 }
@@ -463,8 +479,8 @@ pub fn update_all(weak: Weak<MainWindow>, state: SharedConfigState) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
-        let entries = config::get().configs;
+    crate::runtime::spawn_blocking(move || {
+        let entries = config::configs();
         let mut failures = Vec::new();
         let mut enabled_updated = false;
         for entry in entries {
@@ -499,10 +515,9 @@ fn save_entry(
     if source_uri.is_empty() {
         return Err("源地址不能为空".to_string());
     }
-    let snapshot = config::get();
+    let configs = config::configs();
     source::ensure_unique_source_uri(
-        snapshot
-            .configs
+        configs
             .iter()
             .map(|entry| (entry.path.as_str(), entry.source_uri.as_str())),
         editing_path,
@@ -516,8 +531,7 @@ fn save_entry(
         None
     } else {
         Some(
-            snapshot
-                .configs
+            configs
                 .iter()
                 .find(|entry| entry.path == editing_path)
                 .ok_or_else(|| "未找到要编辑的配置".to_string())?,
@@ -561,8 +575,7 @@ fn save_entry(
 }
 
 fn update_entry(root: &Path, path: &str) -> Result<(), String> {
-    let entry = config::get()
-        .configs
+    let entry = config::configs()
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| "未找到要更新的配置".to_string())?;
@@ -582,8 +595,7 @@ fn update_entry_without_core(root: &Path, entry: &ConfigEntry) -> Result<(), Str
 }
 
 fn delete_entry(root: &Path, path: &str) -> Result<(), String> {
-    let entry = config::get()
-        .configs
+    let entry = config::configs()
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| "未找到要删除的配置".to_string())?;

@@ -1,14 +1,16 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use slint::{ComponentHandle, ModelRc, VecModel, Weak};
-use tokio::sync::broadcast;
+use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
+use tokio::sync::mpsc;
 
 use crate::clash::api::{self, ConnEntry, ConnectionSnapshot};
 use crate::{ConnectionDetailRow, ConnectionRow, ConnectionsModel, MainWindow};
+
+pub const MAX_CONNECTION_HISTORY: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct ConnectionRecord {
@@ -20,7 +22,7 @@ pub struct ConnectionRecord {
 #[derive(Debug, Clone)]
 pub struct ClosedConnection {
     pub history_id: u64,
-    pub record: ConnectionRecord,
+    pub record: Arc<ConnectionRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,8 +63,8 @@ impl Default for SortState {
 
 #[derive(Debug, Clone)]
 pub struct ConnectionsViewState {
-    pub active_by_id: HashMap<String, ConnectionRecord>,
-    pub closed: Vec<ClosedConnection>,
+    pub active_by_id: HashMap<String, Arc<ConnectionRecord>>,
+    pub closed: VecDeque<ClosedConnection>,
     pub initialized: bool,
     pub previous_snapshot_at: Option<Instant>,
     pub selected_tab: ConnectionTab,
@@ -80,7 +82,7 @@ impl Default for ConnectionsViewState {
     fn default() -> Self {
         Self {
             active_by_id: HashMap::new(),
-            closed: Vec::new(),
+            closed: VecDeque::new(),
             initialized: false,
             previous_snapshot_at: None,
             selected_tab: ConnectionTab::Active,
@@ -219,32 +221,18 @@ pub fn clear_runtime(state: &SharedConnectionsState) {
     next_operation_token(&mut state);
 }
 
-pub fn read_state(state: &SharedConnectionsState) -> ConnectionsViewState {
-    lock_state(state).clone()
-}
-
-pub fn start_recorder(
-    mut receiver: broadcast::Receiver<ConnectionSnapshot>,
-) -> ConnectionsRecorder {
+pub fn start_recorder(mut receiver: mpsc::Receiver<ConnectionSnapshot>) -> ConnectionsRecorder {
     let recorder = ConnectionsRecorder {
         state: new_state(),
         notifier: Arc::new(Mutex::new(None)),
     };
     let worker = recorder.clone();
-    std::thread::Builder::new()
-        .name("connections-recorder".to_string())
-        .spawn(move || loop {
-            let result = api::block(async { receiver.recv().await });
-            match result {
-                Ok(snapshot) => {
-                    apply_snapshot(&worker.state, snapshot, Instant::now());
-                    worker.notify();
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        })
-        .expect("启动连接记录器线程失败");
+    crate::runtime::spawn_task(async move {
+        while let Some(snapshot) = receiver.recv().await {
+            apply_snapshot(&worker.state, snapshot, Instant::now());
+            worker.notify();
+        }
+    });
     recorder
 }
 
@@ -268,7 +256,7 @@ impl ConnectionsRecorder {
 #[derive(Clone)]
 struct VisibleConnection {
     identity: String,
-    record: ConnectionRecord,
+    record: Arc<ConnectionRecord>,
 }
 
 fn visible_connections(state: &ConnectionsViewState) -> Vec<VisibleConnection> {
@@ -293,7 +281,7 @@ fn visible_connections(state: &ConnectionsViewState) -> Vec<VisibleConnection> {
     };
 
     let query = state.query.to_ascii_lowercase();
-    visible.retain(|item| matches_query_normalized(&item.record, &query));
+    visible.retain(|item| matches_query(&item.record, &query));
     visible.sort_by(|left, right| compare_visible(left, right, state.sort));
     visible
 }
@@ -335,6 +323,9 @@ fn compare_visible(
 
 fn secondary_text(record: &ConnectionRecord) -> String {
     let mut values = Vec::new();
+    if !record.entry.metadata.process.is_empty() {
+        values.push(record.entry.metadata.process.clone());
+    }
     if !record.entry.metadata.type_.is_empty() {
         values.push(record.entry.metadata.type_.clone());
     }
@@ -347,7 +338,12 @@ fn secondary_text(record: &ConnectionRecord) -> String {
     if !record.entry.rule.is_empty() {
         values.push(format!(
             "{}: {}",
-            record.entry.rule, record.entry.rule_payload
+            record.entry.rule,
+            if record.entry.rule_payload.is_empty() {
+                "-"
+            } else {
+                &record.entry.rule_payload
+            }
         ));
     }
     values.join(" · ")
@@ -359,26 +355,74 @@ pub fn project_rows(state: &ConnectionsViewState) -> Vec<ConnectionRow> {
         .map(|item| ConnectionRow {
             id: item.identity.into(),
             cells: ModelRc::new(VecModel::from(vec![
-                format!(
-                    "{} → {}",
-                    item.record.entry.metadata.process,
-                    connection_host(&item.record).to_string()
-                )
-                .into(),
+                connection_host(&item.record).into(),
                 format_rate(item.record.download_rate).into(),
                 format_rate(item.record.upload_rate).into(),
                 format_bytes(item.record.entry.download).into(),
                 format_bytes(item.record.entry.upload).into(),
             ])),
-            secondary_cells: ModelRc::new(VecModel::from(vec![
-                secondary_text(&item.record).into(),
-                "".into(),
-                "".into(),
-                "".into(),
-                "".into(),
-            ])),
+            secondary_content: secondary_text(&item.record).into(),
         })
         .collect()
+}
+
+fn sync_vec_model<T: Clone + PartialEq + 'static>(model: &VecModel<T>, values: Vec<T>) {
+    let common_count = model.row_count().min(values.len());
+    for (index, value) in values.iter().take(common_count).cloned().enumerate() {
+        if model.row_data(index).as_ref() != Some(&value) {
+            model.set_row_data(index, value);
+        }
+    }
+    while model.row_count() > values.len() {
+        model.remove(model.row_count() - 1);
+    }
+    for value in values.into_iter().skip(common_count) {
+        model.push(value);
+    }
+}
+
+fn reuse_cells_model(current: &ConnectionRow, next: &mut ConnectionRow) {
+    let Some(current_cells) = current
+        .cells
+        .as_any()
+        .downcast_ref::<VecModel<slint::SharedString>>()
+    else {
+        return;
+    };
+    let Some(next_cells) = next
+        .cells
+        .as_any()
+        .downcast_ref::<VecModel<slint::SharedString>>()
+    else {
+        return;
+    };
+    let values = (0..next_cells.row_count())
+        .filter_map(|index| next_cells.row_data(index))
+        .collect();
+    sync_vec_model(current_cells, values);
+    next.cells = current.cells.clone();
+}
+
+fn sync_rows_model(model: &VecModel<ConnectionRow>, rows: Vec<ConnectionRow>) {
+    let common_count = model.row_count().min(rows.len());
+    for index in 0..common_count {
+        let Some(mut row) = rows.get(index).cloned() else {
+            continue;
+        };
+        if let Some(current) = model.row_data(index) {
+            reuse_cells_model(&current, &mut row);
+            if current.id == row.id && current.secondary_content == row.secondary_content {
+                continue;
+            }
+        }
+        model.set_row_data(index, row);
+    }
+    while model.row_count() > rows.len() {
+        model.remove(model.row_count() - 1);
+    }
+    for row in rows.into_iter().skip(common_count) {
+        model.push(row);
+    }
 }
 
 fn sort_column_index(column: Option<SortColumn>) -> i32 {
@@ -412,9 +456,9 @@ fn record_for_identity<'a>(
             .closed
             .iter()
             .find(|closed| closed.history_id == history_id)
-            .map(|closed| &closed.record)
+            .map(|closed| closed.record.as_ref())
     } else {
-        state.active_by_id.get(identity)
+        state.active_by_id.get(identity).map(Arc::as_ref)
     }
 }
 
@@ -610,7 +654,7 @@ pub fn close_connection_async(
         sync_ui(&window, &state);
     }
     let worker_state = state.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = api::close_connection(&identity)
             .map(|_| "关闭连接请求已发送".to_string())
             .map_err(|error| format!("关闭连接失败：{error}"));
@@ -626,7 +670,7 @@ pub fn close_all_async(weak: Weak<MainWindow>, state: SharedConnectionsState) {
         sync_ui(&window, &state);
     }
     let worker_state = state.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = api::close_all_connections()
             .map(|_| "关闭全部连接请求已发送".to_string())
             .map_err(|error| format!("关闭全部连接失败：{error}"));
@@ -696,33 +740,62 @@ pub fn clear_history(weak: Weak<MainWindow>, state: SharedConnectionsState) {
 }
 
 pub fn sync_ui(window: &MainWindow, state: &SharedConnectionsState) {
-    let state = read_state(state);
+    let (rows, detail_rows, selected_tab, query, sort, busy, error, detail_open) = {
+        let state = lock_state(state);
+        let rows = project_rows(&state);
+        let detail_rows = state
+            .detail_identity
+            .as_deref()
+            .and_then(|identity| record_for_identity(&state, identity))
+            .map(detail_fields)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(label, value)| ConnectionDetailRow {
+                label: label.into(),
+                value: value.into(),
+            })
+            .collect::<Vec<_>>();
+        (
+            rows,
+            detail_rows,
+            state.selected_tab,
+            state.query.clone(),
+            state.sort,
+            state.busy,
+            state.error.clone(),
+            state.detail_identity.is_some(),
+        )
+    };
     let model = window.global::<ConnectionsModel>();
-    let detail_rows = state
-        .detail_identity
-        .as_deref()
-        .and_then(|identity| record_for_identity(&state, identity))
-        .map(detail_fields)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(label, value)| ConnectionDetailRow {
-            label: label.into(),
-            value: value.into(),
-        })
-        .collect::<Vec<_>>();
-    model.set_rows(ModelRc::new(VecModel::from(project_rows(&state))));
-    model.set_detail_rows(ModelRc::new(VecModel::from(detail_rows)));
-    model.set_tab(match state.selected_tab {
+    let current_rows = model.get_rows();
+    if let Some(rows_model) = current_rows
+        .as_any()
+        .downcast_ref::<VecModel<ConnectionRow>>()
+    {
+        sync_rows_model(rows_model, rows);
+    } else {
+        model.set_rows(ModelRc::new(VecModel::from(rows)));
+    }
+    let current_detail_rows = model.get_detail_rows();
+    if let Some(detail_model) = current_detail_rows
+        .as_any()
+        .downcast_ref::<VecModel<ConnectionDetailRow>>()
+    {
+        sync_vec_model(detail_model, detail_rows);
+    } else {
+        model.set_detail_rows(ModelRc::new(VecModel::from(detail_rows)));
+    }
+    model.set_tab(match selected_tab {
         ConnectionTab::Active => 0,
         ConnectionTab::Closed => 1,
     });
-    model.set_query(state.query.into());
-    model.set_sort_column(sort_column_index(state.sort.column));
-    model.set_sort_direction(sort_direction_value(state.sort));
+    model.set_query(query.into());
+    model.set_sort_column(sort_column_index(sort.column));
+    model.set_sort_direction(sort_direction_value(sort));
     model.set_loading(false);
-    model.set_busy(state.busy);
-    model.set_error(state.error.clone().into());
-    model.set_detail_open(state.detail_identity.is_some());
+    model.set_busy(busy);
+    model.set_error(error.into());
+    model.set_detail_open(detail_open);
 }
 
 pub fn attach_ui(recorder: &ConnectionsRecorder, weak: Weak<MainWindow>) {
@@ -779,7 +852,10 @@ pub fn apply_snapshot(state: &SharedConnectionsState, snapshot: ConnectionSnapsh
             state.next_history_id = state.next_history_id.wrapping_add(1).max(1);
             state
                 .closed
-                .insert(0, ClosedConnection { history_id, record });
+                .push_front(ClosedConnection { history_id, record });
+            while state.closed.len() > MAX_CONNECTION_HISTORY {
+                state.closed.pop_back();
+            }
         }
     }
 
@@ -800,11 +876,11 @@ pub fn apply_snapshot(state: &SharedConnectionsState, snapshot: ConnectionSnapsh
             .unwrap_or((0.0, 0.0));
         active_by_id.insert(
             entry.id.clone(),
-            ConnectionRecord {
+            Arc::new(ConnectionRecord {
                 entry,
                 upload_rate,
                 download_rate,
-            },
+            }),
         );
     }
 
@@ -839,16 +915,16 @@ pub fn cycle_sort(current: SortState, column: SortColumn) -> SortState {
     }
 }
 
-#[allow(dead_code)]
 pub fn matches_query(record: &ConnectionRecord, query: &str) -> bool {
-    let query = query.to_ascii_lowercase();
-    matches_query_normalized(record, &query)
-}
-
-fn matches_query_normalized(record: &ConnectionRecord, query: &str) -> bool {
     query.is_empty()
-        || connection_host(record).to_ascii_lowercase().contains(query)
-        || record.entry.rule.to_ascii_lowercase().contains(query)
+        || connection_host(record)
+            .to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
+        || record
+            .entry
+            .rule
+            .to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -879,10 +955,14 @@ mod tests {
     use super::{
         apply_snapshot, clear_history_local, clear_runtime, cycle_sort, detail_fields,
         format_bytes, format_rate, matches_query, new_state, project_rows, remove_history_local,
-        visible_connections, ConnectionRecord, ConnectionTab, SortColumn, SortDirection, SortState,
+        sync_rows_model, visible_connections, ConnectionRecord, ConnectionTab, SortColumn,
+        SortDirection, SortState, MAX_CONNECTION_HISTORY,
     };
     use crate::clash::api::{ConnEntry, ConnMeta, ConnectionSnapshot};
+    use crate::ConnectionRow;
     use serde_json::Value;
+    use slint::{Model, ModelRc, SharedString, VecModel};
+    use std::rc::Rc;
     use std::time::{Duration, Instant};
     use tokio::sync::broadcast;
 
@@ -974,6 +1054,58 @@ mod tests {
         }
     }
 
+    fn projected_row(id: &str, cells: &[&str], secondary_content: &str) -> ConnectionRow {
+        ConnectionRow {
+            id: id.into(),
+            cells: ModelRc::new(VecModel::from(
+                cells
+                    .iter()
+                    .map(|cell| SharedString::from(*cell))
+                    .collect::<Vec<_>>(),
+            )),
+            secondary_content: secondary_content.into(),
+        }
+    }
+
+    #[test]
+    fn sync_rows_model_reuses_nested_models_and_updates_data() {
+        let old_cells = Rc::new(VecModel::from(vec![SharedString::from("旧主机")]));
+        let rows = Rc::new(VecModel::from(vec![ConnectionRow {
+            id: "old-id".into(),
+            cells: ModelRc::from(old_cells.clone()),
+            secondary_content: "旧信息".into(),
+        }]));
+        let rows_identity = ModelRc::from(rows.clone());
+
+        sync_rows_model(
+            &rows,
+            vec![
+                projected_row("new-id", &["新主机", "1.0 KB/s"], "新信息"),
+                projected_row("second-id", &["第二行"], "第二行信息"),
+            ],
+        );
+
+        assert_eq!(rows_identity, ModelRc::from(rows.clone()));
+        assert_eq!(rows.row_count(), 2);
+        let first = rows.row_data(0).unwrap();
+        assert_eq!(first.id, SharedString::from("new-id"));
+        assert_eq!(first.secondary_content, SharedString::from("新信息"));
+        assert_eq!(first.cells, ModelRc::from(old_cells.clone()));
+        assert_eq!(old_cells.row_count(), 2);
+        assert_eq!(old_cells.row_data(0), Some(SharedString::from("新主机")));
+        assert_eq!(old_cells.row_data(1), Some(SharedString::from("1.0 KB/s")));
+
+        sync_rows_model(
+            &rows,
+            vec![projected_row("final-id", &["最终主机"], "最终信息")],
+        );
+
+        assert_eq!(rows.row_count(), 1);
+        assert_eq!(old_cells.row_count(), 1);
+        assert_eq!(old_cells.row_data(0), Some(SharedString::from("最终主机")));
+        assert_eq!(rows.row_data(0).unwrap().id, SharedString::from("final-id"));
+    }
+
     #[test]
     fn first_frame_only_establishes_active_baseline() {
         let state = new_state();
@@ -1049,6 +1181,31 @@ mod tests {
         assert_eq!(state.closed[0].record.entry.id, "a");
         assert_eq!(state.closed[1].record.entry.id, "b");
         assert_eq!(state.closed[2].record.entry.id, "a");
+    }
+
+    #[test]
+    fn history_keeps_only_latest_thousand_complete_records() {
+        let state = new_state();
+        let start = Instant::now();
+        for index in 0..=MAX_CONNECTION_HISTORY {
+            let id = index.to_string();
+            let now = start + Duration::from_millis((index * 2) as u64);
+            apply_snapshot(
+                &state,
+                snapshot(vec![entry(&id, &format!("{id}.example"), index as u64, 0)]),
+                now,
+            );
+            apply_snapshot(&state, snapshot(Vec::new()), now + Duration::from_millis(1));
+        }
+
+        let view = state.lock().unwrap();
+        assert_eq!(view.closed.len(), MAX_CONNECTION_HISTORY);
+        assert_eq!(view.closed.front().unwrap().record.entry.id, "1000");
+        assert_eq!(view.closed.back().unwrap().record.entry.id, "1");
+        assert_eq!(
+            detail_fields(&view.closed.front().unwrap().record).len(),
+            expected_detail_labels().len()
+        );
     }
 
     #[test]
@@ -1166,7 +1323,7 @@ mod tests {
                 .find(|(label, _)| label == "源 IP 地理信息")
                 .unwrap()
                 .1,
-            "[\n  \"CN\"\n]"
+            "CN"
         );
         assert_eq!(fields.len(), 35);
     }

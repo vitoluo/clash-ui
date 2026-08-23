@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::app::config::SourceType;
-use crate::clash::api;
+use crate::network::http;
 
 /// 将表单中的来源类型转换为领域模型。
 pub fn parse_source_type(value: &str) -> Result<SourceType, String> {
@@ -56,22 +56,8 @@ pub fn read_source(source_type: SourceType, source_uri: &str) -> Result<String, 
             if !(source_uri.starts_with("http://") || source_uri.starts_with("https://")) {
                 return Err("HTTP 地址必须以 http:// 或 https:// 开头".to_string());
             }
-            let uri = source_uri.to_string();
-            api::block(async move {
-                let response = reqwest::Client::new()
-                    .get(&uri)
-                    .timeout(Duration::from_secs(30))
-                    .send()
-                    .await
-                    .map_err(|error| format!("HTTP 下载失败：{error}"))?;
-                if !response.status().is_success() {
-                    return Err(format!("HTTP 下载失败：状态码 {}", response.status()));
-                }
-                response
-                    .text()
-                    .await
-                    .map_err(|error| format!("读取 HTTP 响应失败：{error}"))
-            })
+            http::download_text(source_uri, Duration::from_secs(30))
+                .map_err(|error| format!("HTTP 下载失败：{error}"))
         }
     }
 }

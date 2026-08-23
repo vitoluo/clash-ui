@@ -141,6 +141,9 @@ export component ListView inherits ScrollView {
     }
 
     changed viewport-height => {
+        if (root.visible-height > root.viewport-height) {
+            root.viewport-y = 0;
+        }
         if (root.auto-scroll) {
             root.scroll-to-end();
         }

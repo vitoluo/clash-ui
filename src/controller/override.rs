@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use slint::{ComponentHandle, ModelRc, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 
 use crate::app::config::{self, OverrideEntry};
 use crate::clash::core;
@@ -25,6 +25,9 @@ pub struct OverrideViewState {
 pub type SharedOverrideState = Arc<Mutex<OverrideViewState>>;
 
 pub(crate) fn bind_callbacks(window: &MainWindow, state: SharedOverrideState) {
+    window
+        .global::<OverrideModel>()
+        .set_overrides(ModelRc::new(VecModel::default()));
     bind_item_callbacks(window, state.clone());
     bind_form_callbacks(window, state);
 }
@@ -228,10 +231,36 @@ fn override_rows(entries: &[OverrideEntry]) -> Vec<OverrideRow> {
 
 fn set_ui_model(window: &MainWindow, state: &OverrideViewState, entries: &[OverrideEntry]) {
     let model = window.global::<OverrideModel>();
-    model.set_overrides(ModelRc::new(VecModel::from(override_rows(entries))));
+    let rows = override_rows(entries);
+    let current = model.get_overrides();
+    if let Some(rows_model) = current.as_any().downcast_ref::<VecModel<OverrideRow>>() {
+        sync_rows(rows_model, rows);
+    } else {
+        model.set_overrides(ModelRc::new(VecModel::from(rows)));
+    }
+    set_ui_state(window, state);
+}
+
+fn set_ui_state(window: &MainWindow, state: &OverrideViewState) {
+    let model = window.global::<OverrideModel>();
     model.set_loading(state.loading);
     model.set_busy(state.busy);
     model.set_error(state.error.clone().into());
+}
+
+fn sync_rows(model: &VecModel<OverrideRow>, rows: Vec<OverrideRow>) {
+    let common = model.row_count().min(rows.len());
+    for (index, row) in rows.iter().take(common).cloned().enumerate() {
+        if model.row_data(index).as_ref() != Some(&row) {
+            model.set_row_data(index, row);
+        }
+    }
+    while model.row_count() > rows.len() {
+        model.remove(model.row_count() - 1);
+    }
+    for row in rows.into_iter().skip(common) {
+        model.push(row);
+    }
 }
 
 fn set_toast(window: &MainWindow, message: &str, variant: i32) {
@@ -252,33 +281,17 @@ where
 
 /// 从 app.yaml 快照刷新覆写卡片，不轮询外部服务。
 pub fn refresh_async(weak: Weak<MainWindow>, state: SharedOverrideState) {
-    let token = {
-        let mut view = lock_state(&state);
-        if view.busy {
-            return;
-        }
-        let token = next_token(&mut view);
-        view.refresh_token = token;
-        view.loading = true;
-        view.error.clear();
-        if let Some(window) = weak.upgrade() {
-            set_ui_model(&window, &view, &config::get().overrides);
-        }
-        token
-    };
-
-    std::thread::spawn(move || {
-        let snapshot = config::get();
-        invoke_ui(move || {
-            let Some(window) = weak.upgrade() else { return };
-            let mut view = lock_state(&state);
-            if view.refresh_token != token {
-                return;
-            }
-            view.loading = false;
-            set_ui_model(&window, &view, &snapshot.overrides);
-        });
-    });
+    let mut view = lock_state(&state);
+    if view.busy {
+        return;
+    }
+    let token = next_token(&mut view);
+    view.refresh_token = token;
+    view.loading = false;
+    view.error.clear();
+    if let Some(window) = weak.upgrade() {
+        set_ui_model(&window, &view, &config::overrides());
+    }
 }
 
 fn begin_operation(weak: &Weak<MainWindow>, state: &SharedOverrideState) -> Option<u64> {
@@ -293,7 +306,7 @@ fn begin_operation(weak: &Weak<MainWindow>, state: &SharedOverrideState) -> Opti
     view.busy = true;
     view.error.clear();
     if let Some(window) = weak.upgrade() {
-        set_ui_model(&window, &view, &config::get().overrides);
+        set_ui_state(&window, &view);
     }
     Some(token)
 }
@@ -326,8 +339,13 @@ pub(crate) fn finish_operation(
                 set_toast(&window, &message, 2);
             }
         }
-        set_ui_model(&window, &view, &config::get().overrides);
+        if success {
+            set_ui_model(&window, &view, &config::overrides());
+        } else {
+            set_ui_state(&window, &view);
+        }
         home::refresh_runtime_state(&window);
+        home::refresh_static(window.as_weak());
         if !success && close_form {
             window.global::<OverrideModel>().set_form_open(true);
         }
@@ -340,9 +358,9 @@ pub fn toggle_enabled(weak: Weak<MainWindow>, state: SharedOverrideState, path: 
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
-        let snapshot = config::get();
-        let (updated, enabled) = match toggle_snapshot(&snapshot.overrides, &path) {
+    crate::runtime::spawn_blocking(move || {
+        let overrides = config::overrides();
+        let (updated, enabled) = match toggle_snapshot(&overrides, &path) {
             Ok(updated) => updated,
             Err(error) => {
                 finish_operation(weak, state, token, Err(error), false);
@@ -398,9 +416,9 @@ pub fn reorder(weak: Weak<MainWindow>, state: SharedOverrideState, path: String,
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
-        let snapshot = config::get();
-        let reordered = match reorder_snapshot(&snapshot.overrides, &path, target) {
+    crate::runtime::spawn_blocking(move || {
+        let overrides = config::overrides();
+        let reordered = match reorder_snapshot(&overrides, &path, target) {
             Ok(reordered) => reordered,
             Err(error) => {
                 finish_operation(weak, state, token, Err(error), false);
@@ -411,7 +429,7 @@ pub fn reorder(weak: Weak<MainWindow>, state: SharedOverrideState, path: String,
             finish_operation(weak, state, token, Ok("覆写顺序未改变".to_string()), false);
             return;
         };
-        let core_changed = enabled_order_changed(&snapshot.overrides, &reordered);
+        let core_changed = enabled_order_changed(&overrides, &reordered);
         config::update(|current| current.overrides = reordered);
         let result = if core_changed {
             core::on_config_changed(&root)
@@ -437,7 +455,7 @@ pub fn submit_form(
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = save_entry(&root, &editing_path, &name, &source_type, &source_uri)
             .map(|_| "覆写已保存".to_string())
             .map_err(|error| format!("保存覆写失败：{error}"));
@@ -451,7 +469,7 @@ pub fn update(weak: Weak<MainWindow>, state: SharedOverrideState, path: String) 
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = update_entry(&root, &path)
             .map(|_| "覆写已更新".to_string())
             .map_err(|error| format!("更新覆写失败：{error}"));
@@ -465,7 +483,7 @@ pub fn delete(weak: Weak<MainWindow>, state: SharedOverrideState, path: String) 
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = delete_entry(&root, &path)
             .map(|_| "覆写已删除".to_string())
             .map_err(|error| format!("删除覆写失败：{error}"));
@@ -479,8 +497,8 @@ pub fn update_all(weak: Weak<MainWindow>, state: SharedOverrideState) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    std::thread::spawn(move || {
-        let entries = sorted_entries(&config::get().overrides);
+    crate::runtime::spawn_blocking(move || {
+        let entries = sorted_entries(&config::overrides());
         let mut failures = Vec::new();
         let mut enabled_updated = false;
         for entry in entries {
@@ -508,7 +526,7 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedOverrideState) {
     let Some(token) = begin_operation(&weak, &state) else {
         return;
     };
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = platform::pick_config_file().and_then(|path| match path {
             Some(path) if path.is_file() => Ok(Some(path)),
             Some(_) => Err("选择的路径不是文件".to_string()),
@@ -533,7 +551,7 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedOverrideState) {
                     set_toast(&window, &error, 2);
                 }
             }
-            set_ui_model(&window, &view, &config::get().overrides);
+            set_ui_state(&window, &view);
         });
     });
 }
@@ -561,8 +579,7 @@ pub fn edit(weak: Weak<MainWindow>, state: SharedOverrideState, path: String) {
     if lock_state(&state).busy {
         return;
     }
-    let entry = config::get()
-        .overrides
+    let entry = config::overrides()
         .into_iter()
         .find(|entry| entry.path == path);
     let Some(entry) = entry else {
@@ -601,10 +618,9 @@ fn save_entry(
     if source_uri.is_empty() {
         return Err("源地址不能为空".to_string());
     }
-    let snapshot = config::get();
+    let overrides = config::overrides();
     source::ensure_unique_source_uri(
-        snapshot
-            .overrides
+        overrides
             .iter()
             .map(|entry| (entry.path.as_str(), entry.source_uri.as_str())),
         editing_path,
@@ -618,8 +634,7 @@ fn save_entry(
         None
     } else {
         Some(
-            snapshot
-                .overrides
+            overrides
                 .iter()
                 .find(|entry| entry.path == editing_path)
                 .ok_or_else(|| "未找到要编辑的覆写".to_string())?,
@@ -638,7 +653,7 @@ fn save_entry(
         source_type,
         source_uri,
         source::relative_internal_path(root, &internal_path),
-        next_sort(&snapshot.overrides),
+        next_sort(&overrides),
     );
     config::update(|current| {
         if let Some(index) = current
@@ -660,8 +675,7 @@ fn save_entry(
 }
 
 fn update_entry(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let entry = config::get()
-        .overrides
+    let entry = config::overrides()
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| "未找到要更新的覆写".to_string())?;
@@ -681,8 +695,8 @@ fn update_entry_without_core(root: &std::path::Path, entry: &OverrideEntry) -> R
 }
 
 fn delete_entry(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let snapshot = config::get();
-    let (entry, remaining) = remove_and_normalize(&snapshot.overrides, path)?;
+    let overrides = config::overrides();
+    let (entry, remaining) = remove_and_normalize(&overrides, path)?;
     let target = source::safe_internal_path(root, OVERRIDES_DIR, &entry.path)?;
     if target.exists() {
         std::fs::remove_file(&target).map_err(|error| format!("删除内部副本失败：{error}"))?;

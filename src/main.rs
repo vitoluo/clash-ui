@@ -7,6 +7,8 @@ pub(crate) mod clash;
 #[path = "const.rs"]
 mod constants;
 mod controller;
+mod network;
+mod runtime;
 
 pub use clash_ui::{log, platform};
 

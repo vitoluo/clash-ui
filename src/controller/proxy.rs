@@ -212,28 +212,28 @@ impl ProxyViewState {
     }
 
     fn to_slint_groups(&self) -> Vec<ProxyGroup> {
-        self.groups
-            .iter()
-            .map(|group| {
-                let nodes = group
-                    .nodes
-                    .iter()
-                    .map(|node| ProxyNode {
-                        name: node.name.clone().into(),
-                        r#type: node.type_.clone().into(),
-                        latency: node.latency,
-                        latency_state: node.latency_state,
-                    })
-                    .collect::<Vec<_>>();
-                ProxyGroup {
-                    name: group.name.clone().into(),
-                    now: group.now.clone().into(),
-                    open: group.open,
-                    testing: group.testing,
-                    nodes: ModelRc::new(VecModel::from(nodes)),
-                }
-            })
-            .collect()
+        self.groups.iter().map(to_slint_group).collect()
+    }
+}
+
+fn to_slint_node(node: &ProxyNodeState) -> ProxyNode {
+    ProxyNode {
+        name: node.name.clone().into(),
+        r#type: node.type_.clone().into(),
+        latency: node.latency,
+        latency_state: node.latency_state,
+    }
+}
+
+fn to_slint_group(group: &ProxyGroupState) -> ProxyGroup {
+    ProxyGroup {
+        name: group.name.clone().into(),
+        now: group.now.clone().into(),
+        open: group.open,
+        testing: group.testing,
+        nodes: ModelRc::new(VecModel::from(
+            group.nodes.iter().map(to_slint_node).collect::<Vec<_>>(),
+        )),
     }
 }
 
@@ -249,8 +249,56 @@ fn set_ui_model(window: &MainWindow, state: &ProxyViewState) {
     } else {
         model.set_groups(ModelRc::new(VecModel::from(groups)));
     }
+    set_ui_state(window, state);
+}
+
+fn set_ui_state(window: &MainWindow, state: &ProxyViewState) {
+    let model = window.global::<crate::ProxyModel>();
     model.set_loading(state.loading);
     model.set_error(state.error.clone().into());
+}
+
+fn update_group_row(window: &MainWindow, state: &ProxyViewState, index: usize) {
+    let Some(group) = state.groups.get(index) else {
+        return;
+    };
+    let groups = window.global::<crate::ProxyModel>().get_groups();
+    let Some(groups) = groups.as_any().downcast_ref::<VecModel<ProxyGroup>>() else {
+        set_ui_model(window, state);
+        return;
+    };
+    let mut next = to_slint_group(group);
+    if let Some(current) = groups.row_data(index) {
+        reuse_node_model(&current, &mut next);
+    }
+    groups.set_row_data(index, next);
+    set_ui_state(window, state);
+}
+
+fn update_node_row(
+    window: &MainWindow,
+    state: &ProxyViewState,
+    group_index: usize,
+    node_index: usize,
+) {
+    let Some(node) = state
+        .groups
+        .get(group_index)
+        .and_then(|group| group.nodes.get(node_index))
+    else {
+        return;
+    };
+    let groups = window.global::<crate::ProxyModel>().get_groups();
+    let Some(group) = groups.row_data(group_index) else {
+        set_ui_model(window, state);
+        return;
+    };
+    let Some(nodes) = group.nodes.as_any().downcast_ref::<VecModel<ProxyNode>>() else {
+        set_ui_model(window, state);
+        return;
+    };
+    nodes.set_row_data(node_index, to_slint_node(node));
+    set_ui_state(window, state);
 }
 
 pub fn sync_ui(window: &MainWindow, state: &SharedProxyState) {
@@ -258,10 +306,12 @@ pub fn sync_ui(window: &MainWindow, state: &SharedProxyState) {
     set_ui_model(window, &state);
 }
 
-fn sync_vec_model<T: Clone + 'static>(model: &VecModel<T>, values: Vec<T>) {
+fn sync_vec_model<T: Clone + PartialEq + 'static>(model: &VecModel<T>, values: Vec<T>) {
     let common_count = model.row_count().min(values.len());
     for (index, value) in values.iter().take(common_count).cloned().enumerate() {
-        model.set_row_data(index, value);
+        if model.row_data(index).as_ref() != Some(&value) {
+            model.set_row_data(index, value);
+        }
     }
     while model.row_count() > values.len() {
         model.remove(model.row_count() - 1);
@@ -293,6 +343,13 @@ fn sync_groups_model(model: &VecModel<ProxyGroup>, groups: Vec<ProxyGroup>) {
         };
         if let Some(current) = model.row_data(index) {
             reuse_node_model(&current, &mut group);
+            if current.name == group.name
+                && current.now == group.now
+                && current.open == group.open
+                && current.testing == group.testing
+            {
+                continue;
+            }
         }
         model.set_row_data(index, group);
     }
@@ -322,12 +379,12 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedProxyState) {
         view.error.clear();
         view.set_loading(true);
         if let Some(window) = weak.upgrade() {
-            set_ui_model(&window, &view);
+            set_ui_state(&window, &view);
         }
         token
     };
 
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = api::get_proxies();
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
@@ -356,7 +413,7 @@ pub fn toggle_group(weak: Weak<MainWindow>, state: SharedProxyState, index: i32)
     if let Some(group) = view.groups.get_mut(index.max(0) as usize) {
         group.open = !group.open;
     }
-    set_ui_model(&window, &view);
+    update_group_row(&window, &view, index.max(0) as usize);
 }
 
 pub fn select_node_async(
@@ -381,12 +438,12 @@ pub fn select_node_async(
         view.error.clear();
         view.set_loading(true);
         if let Some(window) = weak.upgrade() {
-            set_ui_model(&window, &view);
+            set_ui_state(&window, &view);
         }
         (group_name, node_name, token)
     };
 
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = api::select_proxy(&group_name, &node_name).and_then(|_| api::get_proxies());
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
@@ -434,12 +491,12 @@ pub fn test_group_async(weak: Weak<MainWindow>, state: SharedProxyState, group_i
         let group_name = group.name.clone();
         let test_url = group.test_url.clone();
         if let Some(window) = weak.upgrade() {
-            set_ui_model(&window, &view);
+            update_group_row(&window, &view, index);
         }
         (group_name, test_url, token)
     };
 
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = api::get_group_delay(&group_name, &test_url, TEST_TIMEOUT_MS);
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
@@ -482,7 +539,13 @@ pub fn test_group_async(weak: Weak<MainWindow>, state: SharedProxyState, group_i
                 }
             }
             group.testing = false;
-            set_ui_model(&window, &view);
+            if let Some(index) = view
+                .groups
+                .iter()
+                .position(|group| group.name == group_name)
+            {
+                update_group_row(&window, &view, index);
+            }
         });
     });
 }
@@ -521,12 +584,12 @@ pub fn test_node_async(
         node.operation_token = token;
         node.result_override = true;
         if let Some(window) = weak.upgrade() {
-            set_ui_model(&window, &view);
+            update_node_row(&window, &view, group_position, node_position);
         }
         (group_name, node_name, test_url, token)
     };
 
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = api::get_proxy_delay(&node_name, &test_url, TEST_TIMEOUT_MS);
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
@@ -554,7 +617,19 @@ pub fn test_node_async(
                     node.latency_state = LATENCY_FAILED;
                 }
             }
-            set_ui_model(&window, &view);
+            if let Some(group_index) = view
+                .groups
+                .iter()
+                .position(|group| group.name == group_name)
+            {
+                if let Some(node_index) = view.groups[group_index]
+                    .nodes
+                    .iter()
+                    .position(|node| node.name == node_name)
+                {
+                    update_node_row(&window, &view, group_index, node_index);
+                }
+            }
         });
     });
 }

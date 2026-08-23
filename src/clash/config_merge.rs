@@ -47,10 +47,10 @@ fn parse_instruction(key: &str) -> Option<(String, ArrayOp)> {
 }
 
 // 对目标数组应用前置、追加或插入操作。
-fn apply_array_op(target: &mut Value, op: ArrayOp, other: &Value) {
-    let other_array: Vec<Value> = match other {
-        Value::Array(values) => values.clone(),
-        _ => vec![other.clone()],
+fn apply_array_op(target: &mut Value, op: ArrayOp, other: Value) {
+    let other_array = match other {
+        Value::Array(values) => values,
+        value => vec![value],
     };
     let mut base_array = match target {
         Value::Array(values) => std::mem::take(values),
@@ -76,37 +76,32 @@ fn apply_array_op(target: &mut Value, op: ArrayOp, other: &Value) {
 }
 
 // 深度合并对象；数组默认整体覆盖，数组指令按键名执行。
-fn deep_merge(base: &mut Value, other: &Value) {
-    if !matches!(base, Value::Object(_)) || !matches!(other, Value::Object(_)) {
-        *base = other.clone();
+fn deep_merge(base: &mut Value, other: Value) {
+    let Value::Object(other_map) = other else {
+        *base = other;
         return;
-    }
-    let base_map = base.as_object_mut().unwrap();
-    let other_map = other.as_object().unwrap();
+    };
+    let Value::Object(base_map) = base else {
+        *base = Value::Object(other_map);
+        return;
+    };
 
-    let normal_keys: Vec<String> = other_map
-        .keys()
-        .filter(|key| !is_instruction_key(key))
-        .cloned()
-        .collect();
-    for key in normal_keys {
-        let other_value = other_map.get(&key).unwrap();
+    let mut instructions = Vec::new();
+    for (key, value) in other_map {
+        if is_instruction_key(&key) {
+            instructions.push((key, value));
+            continue;
+        }
         match base_map.get_mut(&key) {
-            Some(base_value) => deep_merge(base_value, other_value),
+            Some(base_value) => deep_merge(base_value, value),
             None => {
-                base_map.insert(key, other_value.clone());
+                base_map.insert(key, value);
             }
         }
     }
 
-    let instruction_keys: Vec<String> = other_map
-        .keys()
-        .filter(|key| is_instruction_key(key))
-        .cloned()
-        .collect();
-    for instruction_key in instruction_keys {
+    for (instruction_key, other_array) in instructions {
         if let Some((target, op)) = parse_instruction(&instruction_key) {
-            let other_array = other_map.get(&instruction_key).unwrap();
             match base_map.get_mut(&target) {
                 Some(target_value) => apply_array_op(target_value, op, other_array),
                 None => {
@@ -143,7 +138,7 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
         let value: Value = serde_saphyr::from_str(&content).map_err(|error| {
             CoreError::Parse(format!("解析配置 {} 失败", entry.path), Box::new(error))
         })?;
-        deep_merge(&mut merged, &value);
+        deep_merge(&mut merged, value);
     }
 
     let mut overrides: Vec<&OverrideEntry> =
@@ -155,7 +150,7 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
         let value: Value = serde_saphyr::from_str(&content).map_err(|error| {
             CoreError::Parse(format!("解析覆盖 {} 失败", entry.path), Box::new(error))
         })?;
-        deep_merge(&mut merged, &value);
+        deep_merge(&mut merged, value);
     }
 
     let mut clash_value = serde_json::to_value(&cfg.settings.clash).map_err(CoreError::Json)?;
@@ -168,13 +163,13 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
             tun_map.insert("enable".to_string(), Value::Bool(tun_enable));
         }
     }
-    deep_merge(&mut merged, &clash_value);
+    deep_merge(&mut merged, clash_value);
 
     let fixed_content = fs::read_to_string(fixed_yaml_path(root))
         .map_err(|error| CoreError::Io("读取固定配置失败".into(), error))?;
     let fixed_value: Value = serde_saphyr::from_str(&fixed_content)
         .map_err(|error| CoreError::Parse("解析固定配置失败".into(), Box::new(error)))?;
-    deep_merge(&mut merged, &fixed_value);
+    deep_merge(&mut merged, fixed_value);
 
     if let Value::Object(map) = &mut merged {
         // 合并完成后移除可选代理端口的 null 值，避免传给核心无效配置。
@@ -240,7 +235,7 @@ mod tests {
     fn deep_merge_overwrites_and_preserves_missing_keys() {
         let mut base: Value = serde_json::from_str(r#"{"a":1,"b":{"x":1,"y":2}}"#).unwrap();
         let other: Value = serde_json::from_str(r#"{"b":{"y":20,"z":3},"c":4}"#).unwrap();
-        deep_merge(&mut base, &other);
+        deep_merge(&mut base, other);
         assert_eq!(base["a"].as_i64(), Some(1));
         assert_eq!(base["b"]["y"].as_i64(), Some(20));
         assert_eq!(base["b"]["x"].as_i64(), Some(1));
@@ -251,25 +246,36 @@ mod tests {
     #[test]
     fn array_instructions_apply_without_leaking_instruction_keys() {
         let mut base = serde_json::json!({"list": ["a", "b"]});
-        deep_merge(&mut base, &serde_json::json!({"list::^": ["z"]}));
+        deep_merge(&mut base, serde_json::json!({"list::^": ["z"]}));
         assert_eq!(base["list"], serde_json::json!(["z", "a", "b"]));
         assert!(base.get("list::^").is_none());
 
         let mut base = serde_json::json!({"list": ["a", "b"]});
-        deep_merge(&mut base, &serde_json::json!({"list::$": ["z"]}));
+        deep_merge(&mut base, serde_json::json!({"list::$": ["z"]}));
         assert_eq!(base["list"], serde_json::json!(["a", "b", "z"]));
 
         let mut base = serde_json::json!({"list": ["a", "b", "c"]});
-        deep_merge(&mut base, &serde_json::json!({"list::1": ["x"]}));
+        deep_merge(&mut base, serde_json::json!({"list::1": ["x"]}));
         assert_eq!(base["list"], serde_json::json!(["a", "b", "x", "c"]));
 
         let mut base = serde_json::json!({"list": ["a", "b"]});
-        deep_merge(&mut base, &serde_json::json!({"list::9": ["x"]}));
+        deep_merge(&mut base, serde_json::json!({"list::9": ["x"]}));
         assert_eq!(base["list"], serde_json::json!(["a", "b", "x"]));
 
         let mut base = serde_json::json!({});
-        deep_merge(&mut base, &serde_json::json!({"list::$": ["x"]}));
+        deep_merge(&mut base, serde_json::json!({"list::$": ["x"]}));
         assert_eq!(base["list"], serde_json::json!(["x"]));
+    }
+
+    #[test]
+    fn large_array_merge_preserves_order() {
+        let mut base = serde_json::json!({"items": (0..5000).collect::<Vec<_>>()});
+        let suffix = (5000..10000).collect::<Vec<_>>();
+        deep_merge(&mut base, serde_json::json!({"items::$": suffix}));
+        let items = base["items"].as_array().unwrap();
+        assert_eq!(items.len(), 10000);
+        assert_eq!(items.first().unwrap().as_i64(), Some(0));
+        assert_eq!(items.last().unwrap().as_i64(), Some(9999));
     }
 
     #[test]

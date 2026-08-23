@@ -290,6 +290,54 @@ pub fn get() -> AppConfig {
         .clone()
 }
 
+/// 读取代理开关字段快照。
+pub fn proxy_status() -> ProxyStatus {
+    STATE
+        .get()
+        .expect("配置未初始化，请先调用 config::init")
+        .read()
+        .expect("配置读锁被污染")
+        .config
+        .proxy_status
+        .clone()
+}
+
+/// 读取配置来源列表快照。
+pub fn configs() -> Vec<ConfigEntry> {
+    STATE
+        .get()
+        .expect("配置未初始化，请先调用 config::init")
+        .read()
+        .expect("配置读锁被污染")
+        .config
+        .configs
+        .clone()
+}
+
+/// 读取覆写来源列表快照。
+pub fn overrides() -> Vec<OverrideEntry> {
+    STATE
+        .get()
+        .expect("配置未初始化，请先调用 config::init")
+        .read()
+        .expect("配置读锁被污染")
+        .config
+        .overrides
+        .clone()
+}
+
+/// 读取设置字段快照。
+pub fn settings() -> Settings {
+    STATE
+        .get()
+        .expect("配置未初始化，请先调用 config::init")
+        .read()
+        .expect("配置读锁被污染")
+        .config
+        .settings
+        .clone()
+}
+
 /// 修改配置并写回磁盘。
 #[allow(dead_code)]
 pub fn update<F: FnOnce(&mut AppConfig)>(f: F) {

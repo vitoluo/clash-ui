@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use slint::{ComponentHandle, ModelRc, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 use tokio::sync::broadcast;
 
 use crate::clash::api::LogLine;
@@ -149,8 +149,18 @@ pub struct LogsViewState {
     pub selected_tab: LogTab,
     pub all_level: LogLevel,
     pub query: String,
+    query_lowercase: String,
     pub auto_scroll: bool,
     next_sequence: u64,
+    filter_revision: u64,
+    ui_projection: LogsUiProjectionState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LogsUiProjectionState {
+    last_sequence: Option<u64>,
+    filter_revision: u64,
+    visible_sequences: VecDeque<u64>,
 }
 
 #[derive(Clone)]
@@ -175,6 +185,7 @@ pub fn new_state() -> SharedLogsState {
     Arc::new(Mutex::new(LogsViewState::default()))
 }
 
+#[cfg(test)]
 pub fn read_state(state: &SharedLogsState) -> LogsViewState {
     lock_state(state).clone()
 }
@@ -185,24 +196,38 @@ pub fn start_recorder(mut receiver: broadcast::Receiver<LogLine>) -> LogsRecorde
         notifier: Arc::new(Mutex::new(None)),
     };
     let worker = recorder.clone();
-    std::thread::Builder::new()
-        .name("logs-recorder".to_string())
-        .spawn(move || loop {
-            let result = crate::clash::api::block(async { receiver.recv().await });
-            match result {
-                Ok(line) => {
-                    let accepted = lock_state(&worker.state).append_line(line);
-                    if accepted {
-                        worker.notify();
-                    }
-                }
+    crate::runtime::spawn_task(async move {
+        loop {
+            let first = match receiver.recv().await {
+                Ok(line) => line,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     crate::log::error(format_args!("日志记录器跳过 {skipped} 条过期消息"));
+                    continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let mut accepted = lock_state(&worker.state).append_line(first);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+            loop {
+                match tokio::time::timeout_at(deadline, receiver.recv()).await {
+                    Ok(Ok(line)) => accepted |= lock_state(&worker.state).append_line(line),
+                    Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                        crate::log::error(format_args!("日志记录器跳过 {skipped} 条过期消息"));
+                    }
+                    Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        if accepted {
+                            worker.notify();
+                        }
+                        return;
+                    }
+                    Err(_) => break,
+                }
             }
-        })
-        .expect("启动日志记录器线程失败");
+            if accepted {
+                worker.notify();
+            }
+        }
+    });
     recorder
 }
 
@@ -282,8 +307,13 @@ fn project_row(record: &LogRecord) -> LogRow {
     }
 }
 
+#[cfg(test)]
 pub fn project_rows(state: &LogsViewState) -> Vec<LogRow> {
-    state.visible_records().iter().map(project_row).collect()
+    state
+        .visible_records()
+        .into_iter()
+        .map(project_row)
+        .collect()
 }
 
 fn tab_index(tab: LogTab) -> i32 {
@@ -297,13 +327,95 @@ fn tab_index(tab: LogTab) -> i32 {
 }
 
 pub fn sync_ui(window: &MainWindow, state: &SharedLogsState) {
-    let state = read_state(state);
     let model = window.global::<LogsModel>();
-    model.set_rows(ModelRc::new(VecModel::from(project_rows(&state))));
+    let current_rows = model.get_rows();
+    if current_rows
+        .as_any()
+        .downcast_ref::<VecModel<LogRow>>()
+        .is_none()
+    {
+        model.set_rows(ModelRc::new(VecModel::default()));
+    }
+    let rows = model.get_rows();
+    let rows = rows
+        .as_any()
+        .downcast_ref::<VecModel<LogRow>>()
+        .expect("日志模型必须是 VecModel");
+    let mut state = lock_state(state);
+    sync_projection(rows, &mut state);
     model.set_selected_tab(tab_index(state.selected_tab));
     model.set_all_level_index(state.all_level.index());
     model.set_query(state.query.clone().into());
     model.set_paused(state.paused());
+}
+
+fn sync_projection(model: &VecModel<LogRow>, state: &mut LogsViewState) {
+    let oldest = state.records.front().map(|record| record.sequence);
+    let newest = state.records.back().map(|record| record.sequence);
+    let projection_invalid = state.ui_projection.filter_revision != state.filter_revision
+        || state.ui_projection.visible_sequences.len() != model.row_count()
+        || matches!(
+            (state.ui_projection.last_sequence, newest),
+            (Some(last), Some(current)) if current < last
+        );
+
+    if projection_invalid {
+        let visible = state
+            .records
+            .iter()
+            .filter(|record| state.matches_record(record))
+            .map(|record| (record.sequence, project_row(record)))
+            .collect::<Vec<_>>();
+        sync_log_rows(model, visible.iter().map(|(_, row)| row.clone()).collect());
+        state.ui_projection.visible_sequences =
+            visible.into_iter().map(|(sequence, _)| sequence).collect();
+        state.ui_projection.last_sequence = newest;
+        state.ui_projection.filter_revision = state.filter_revision;
+        return;
+    }
+
+    if let Some(oldest) = oldest {
+        while state
+            .ui_projection
+            .visible_sequences
+            .front()
+            .is_some_and(|sequence| *sequence < oldest)
+        {
+            state.ui_projection.visible_sequences.pop_front();
+            model.remove(0);
+        }
+    }
+
+    let last_sequence = state.ui_projection.last_sequence.unwrap_or(0);
+    for record in state
+        .records
+        .iter()
+        .filter(|record| record.sequence > last_sequence)
+    {
+        if state.matches_record(record) {
+            model.push(project_row(record));
+            state
+                .ui_projection
+                .visible_sequences
+                .push_back(record.sequence);
+        }
+    }
+    state.ui_projection.last_sequence = newest.or(state.ui_projection.last_sequence);
+}
+
+fn sync_log_rows(model: &VecModel<LogRow>, rows: Vec<LogRow>) {
+    let common = model.row_count().min(rows.len());
+    for (index, row) in rows.iter().take(common).cloned().enumerate() {
+        if model.row_data(index).as_ref() != Some(&row) {
+            model.set_row_data(index, row);
+        }
+    }
+    while model.row_count() > rows.len() {
+        model.remove(model.row_count() - 1);
+    }
+    for row in rows.into_iter().skip(common) {
+        model.push(row);
+    }
 }
 
 pub fn attach_ui(recorder: &LogsRecorder, weak: Weak<MainWindow>) {
@@ -343,13 +455,17 @@ impl Default for LogsViewState {
             selected_tab: LogTab::All,
             all_level: LogLevel::Debug,
             query: String::new(),
+            query_lowercase: String::new(),
             auto_scroll: true,
             next_sequence: 1,
+            filter_revision: 1,
+            ui_projection: LogsUiProjectionState::default(),
         }
     }
 }
 
 impl LogsViewState {
+    #[cfg(test)]
     pub fn records(&self) -> &VecDeque<LogRecord> {
         &self.records
     }
@@ -369,37 +485,42 @@ impl LogsViewState {
             message,
         };
         self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
-        self.records.push_back(record.clone());
+        self.records.push_back(record);
         while self.records.len() > MAX_LOG_RECORDS {
             self.records.pop_front();
         }
         true
     }
 
-    pub fn visible_records(&self) -> Vec<LogRecord> {
-        let query = self.query.to_lowercase();
+    #[cfg(test)]
+    pub fn visible_records(&self) -> Vec<&LogRecord> {
         self.records()
             .iter()
-            .filter(|record| self.matches_level(record) && Self::matches_query(record, &query))
-            .cloned()
+            .filter(|record| {
+                self.matches_level(record) && Self::matches_query(record, &self.query_lowercase)
+            })
             .collect()
     }
 
     pub fn set_tab(&mut self, tab: LogTab) {
         if self.selected_tab != tab {
             self.selected_tab = tab;
+            self.bump_filter_revision();
         }
     }
 
     pub fn set_all_level(&mut self, level: LogLevel) {
         if self.all_level != level {
             self.all_level = level;
+            self.bump_filter_revision();
         }
     }
 
     pub fn set_query(&mut self, query: String) {
         if self.query != query {
+            self.query_lowercase = query.to_lowercase();
             self.query = query;
+            self.bump_filter_revision();
         }
     }
 
@@ -408,9 +529,8 @@ impl LogsViewState {
     }
 
     pub fn clear(&mut self) {
-        if !self.records.is_empty() {
-            self.records.clear();
-        }
+        self.records.clear();
+        self.bump_filter_revision();
     }
 
     pub fn paused(&self) -> bool {
@@ -427,6 +547,14 @@ impl LogsViewState {
     fn matches_query(record: &LogRecord, query: &str) -> bool {
         query.is_empty() || record.message_lowercase.contains(query)
     }
+
+    fn matches_record(&self, record: &LogRecord) -> bool {
+        self.matches_level(record) && Self::matches_query(record, &self.query_lowercase)
+    }
+
+    fn bump_filter_revision(&mut self) {
+        self.filter_revision = self.filter_revision.wrapping_add(1).max(1);
+    }
 }
 
 #[cfg(test)]
@@ -435,10 +563,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        clear_runtime, new_state, project_rows, read_state, start_recorder, LogLevel, LogTab,
-        LogsViewState, MAX_LOG_RECORDS,
+        clear_runtime, new_state, project_rows, read_state, start_recorder, sync_projection,
+        LogLevel, LogTab, LogsViewState, MAX_LOG_RECORDS,
     };
     use crate::clash::api::LogLine;
+    use slint::{Model, ModelRc, VecModel};
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::sync::broadcast;
 
     fn line(sequence: u64, level: &str, message: &str) -> LogLine {
@@ -572,6 +704,43 @@ mod tests {
         assert_eq!(rows[0].level.to_string(), "DEBUG");
         assert_eq!(rows[0].message.to_string(), "debug message");
         assert_eq!(rows[0].level_index, 3);
+    }
+
+    #[test]
+    fn incremental_projection_reuses_model_and_rebuilds_only_after_filter_change() {
+        let mut state = LogsViewState::default();
+        let rows = Rc::new(VecModel::default());
+        let identity = ModelRc::from(rows.clone());
+        assert!(state.append_line(line(1, "info", "first")));
+        sync_projection(&rows, &mut state);
+        assert_eq!(rows.row_count(), 1);
+
+        assert!(state.append_line(line(2, "debug", "second")));
+        sync_projection(&rows, &mut state);
+        assert_eq!(identity, ModelRc::from(rows.clone()));
+        assert_eq!(rows.row_count(), 2);
+
+        state.set_query("second".to_string());
+        sync_projection(&rows, &mut state);
+        assert_eq!(identity, ModelRc::from(rows.clone()));
+        assert_eq!(rows.row_count(), 1);
+        assert_eq!(rows.row_data(0).unwrap().message.as_str(), "second");
+    }
+
+    #[test]
+    fn recorder_batches_burst_notifications() {
+        let (sender, receiver) = broadcast::channel(32);
+        let recorder = start_recorder(receiver);
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let count = notifications.clone();
+        recorder.set_notifier(Arc::new(move || {
+            count.fetch_add(1, Ordering::AcqRel);
+        }));
+        for sequence in 1..=20 {
+            sender.send(line(sequence, "debug", "burst")).unwrap();
+        }
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(notifications.load(Ordering::Acquire), 1);
     }
 
     #[test]

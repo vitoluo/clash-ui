@@ -24,6 +24,24 @@ cargo run
 cargo build --release
 ```
 
+## 主界面关闭与系统托盘
+
+- 点击主界面关闭按钮只会将窗口隐藏到系统托盘，Clash UI 和 Mihomo 核心仍会继续运行。
+- 点击托盘图标，或在托盘菜单中选择“显示主界面”，可以恢复主界面。
+- 如需真正退出应用，请在托盘菜单中选择“退出”。该操作会停止 Mihomo 核心并退出 Clash UI。
+
+### Linux GNOME 托盘插件
+
+GNOME Shell 默认不显示 AppIndicator/KStatusNotifierItem 托盘项目。请安装并启用 [AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/) 扩展。
+
+安装后可使用以下命令启用扩展：
+
+```bash
+gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com
+```
+
+也可以通过发行版的软件包管理器搜索并安装 `gnome-shell-extension-appindicator`。首次安装扩展或更新 GNOME Shell 后，请按提示重新登录；X11 会话也可以使用 `Alt`+`F2`，输入 `r` 后回车重启 GNOME Shell。启动 Clash UI 后，托盘图标应显示在 GNOME 顶栏中。
+
 ## 覆写数组 key 规则
 
 覆写或配置文件中的数组字段默认由后者整体替换前者。如需在已有数组上增删元素，可使用以下兄弟键指令；指令键仅在合并时生效，不会写入最终的 `config.yaml`：

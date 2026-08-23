@@ -221,7 +221,15 @@ component ProxyGroupLayout inherits Rectangle {
     in property <int> group-index;
 
     property <length> header-height: group-card.height;
-    property <length> content-height: node-grid.height;
+    property <int> node-columns: root.data.nodes.length > 0
+        ? Math.max(1, Math.floor((self.width + Theme.spacing-sm) / (200px + Theme.spacing-sm)))
+        : 0;
+    property <int> node-rows: root.data.nodes.length > 0
+        ? Math.ceil(root.data.nodes.length / root.node-columns)
+        : 0;
+    property <length> content-height: root.data.open && root.node-rows > 0
+        ? root.node-rows * 60px + (root.node-rows - 1) * Theme.spacing-sm
+        : 0px;
 
     height: root.data.open ? header-height + Theme.spacing-sm + content-height : header-height;
 
@@ -237,12 +245,11 @@ component ProxyGroupLayout inherits Rectangle {
         group-index: root.group-index;
     }
 
-    node-grid := ResponsiveGrid {
+    if root.data.open: node-grid := ResponsiveGrid {
         y: root.header-height + Theme.spacing-sm;
-        item-count: root.data.open ? root.data.nodes.length : 0;
+        item-count: root.data.nodes.length;
         item-height: 60px;
-        visible: root.data.open;
-        opacity: root.data.open ? 1 : 0;
+        opacity: 1;
         animate opacity {
             duration: Theme.duration-fade;
             easing: Theme.easing-fade;

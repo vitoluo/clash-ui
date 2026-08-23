@@ -8,10 +8,10 @@ import { Separator } from "separator.slint";
 export struct TableRow {
     id: string,
     cells: [string],
-    secondary-cells: [string],
+    secondary-content: string,
 }
 
-export component TableBodyRow inherits VerticalLayout {
+export component TableBodyRow inherits Rectangle {
     in property <TableRow> data;
     in property <[float]> column-width-ratios: [0.34, 0.33, 0.33];
     in property <bool> show-secondary: false;
@@ -20,57 +20,50 @@ export component TableBodyRow inherits VerticalLayout {
     property <length> row-height: 40px;
     property <length> cell-padding: Theme.spacing-sm;
     out property <length> content-width: root.width - 2 * root.cell-padding;
+    background: row-touch.has-hover ? Theme.surface-1 : Theme.canvas;
 
-    height: row-container.height + (root.show-divider ? 1px : 0px);
-    spacing: 0px;
+    animate background {
+        duration: Theme.duration-hover;
+        easing: Theme.easing-hover;
+    }
 
-    row-container := Rectangle {
-        height: root.show-secondary && root.data.secondary-cells.length > 0
-            ? root.row-height + 18px : root.row-height;
-        background: row-touch.has-hover ? Theme.surface-1 : Theme.canvas;
-
-        row-touch := TouchArea {
-            mouse-cursor: root.data.id == "" ? default : pointer;
-            clicked => {
-                if (root.data.id != "") { root.clicked(root.data.id); }
-            }
+    row-touch := TouchArea {
+        mouse-cursor: root.data.id == "" ? default : pointer;
+        clicked => {
+            if (root.data.id != "") { root.clicked(root.data.id); }
         }
+    }
 
+    row-container := VerticalLayout {
         HorizontalLayout {
+            height: root.row-height;
             padding-left: root.cell-padding;
             padding-right: root.cell-padding;
-            spacing: 0px;
 
-            for cell[cell-index] in root.data.cells: Rectangle {
-                width: root.content-width * root.column-width-ratios[cell-index];
-
-                VerticalLayout {
-                    alignment: center;
-                    spacing: Theme.spacing-xxs;
-
-                    cell-label := Text {
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    for cell[cell-index] in root.data.cells: Text {
+                        width: root.content-width * root.column-width-ratios[cell-index];
                         text: cell;
                         color: Theme.ink-subtle;
                         font-size: Theme.typography-mono;
-                        vertical-alignment: center;
                         overflow: elide;
 
                         if self.preferred-width > self.width: Tooltip {
                             text: @markdown("\{cell}");
                         }
                     }
+                }
 
-                    if root.show-secondary
-                        && root.data.secondary-cells.length > cell-index
-                        && root.data.secondary-cells[cell-index] != "": secondary-label := Text {
-                        text: root.data.secondary-cells[cell-index];
-                        color: Theme.ink-subtle;
-                        font-size: Theme.typography-caption;
-                        overflow: elide;
+                if root.show-secondary: Text {
+                    text: root.data.secondary-content;
+                    color: Theme.ink-tertiary;
+                    font-size: Theme.typography-caption;
+                    overflow: elide;
 
-                        if self.preferred-width > self.width: Tooltip {
-                            text: @markdown("\{root.data.secondary-cells[cell-index]}");
-                        }
+                    if self.preferred-width > self.width: Tooltip {
+                        text: @markdown("\{root.data.secondary-content}");
                     }
                 }
             }
@@ -78,13 +71,8 @@ export component TableBodyRow inherits VerticalLayout {
             @children
         }
 
-        animate background {
-            duration: Theme.duration-hover;
-            easing: Theme.easing-hover;
-        }
+        if root.show-divider: Separator { }
     }
-
-    if root.show-divider: Separator { }
 }
 
 export component Table inherits Rectangle {
@@ -94,42 +82,36 @@ export component Table inherits Rectangle {
     in property <int> sort-column: -1;
     in property <int> sort-direction: 0;
     callback header-clicked(int);
-    property <length> header-height: 42px;
+    property <length> header-height: 40px;
     property <length> cell-padding: Theme.spacing-sm;
     property <length> content-width: root.width - 2 * root.cell-padding;
 
-    background: transparent;
+    border-radius: Theme.rounded-md;
+    clip: true;
 
-    VerticalLayout {
-
-        Rectangle {
+    table-container := VerticalLayout {
+        table-header := Rectangle {
             height: root.header-height;
             background: Theme.surface-2;
-            border-top-left-radius: Theme.rounded-md;
-            border-top-right-radius: Theme.rounded-md;
-
             HorizontalLayout {
                 padding-left: root.cell-padding;
                 padding-right: root.cell-padding;
-                spacing: 0px;
 
                 for col[index] in root.columns: Rectangle {
                     width: root.content-width * root.column-width-ratios[index];
-
-                    if root.sortable: header-touch := TouchArea {
+                    if root.sortable: TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.header-clicked(index); }
                     }
-
                     HorizontalLayout {
                         spacing: Theme.spacing-xxs;
-
-                        header-label := Text {
+                        cross-axis-alignment: center;
+                        Text {
+                            horizontal-stretch: 0;
                             text: col;
                             color: Theme.ink;
-                            font-size: Theme.typography-caption;
+                            font-size: Theme.typography-mono;
                             font-weight: Theme.typography-weight-semibold;
-                            vertical-alignment: center;
                             overflow: elide;
 
                             if self.preferred-width > self.width: Tooltip {
@@ -137,13 +119,10 @@ export component Table inherits Rectangle {
                             }
                         }
 
-                        if root.sortable && root.sort-column == index: VerticalLayout {
-                            alignment: center;
-                            IconDisplay {
-                                icon: root.sort-direction < 0 ? IconSet.ChevronUp : IconSet.ChevronDown;
-                                size: Theme.typography-body-sm;
-                                stroke: Theme.ink-subtle;
-                            }
+                        if root.sortable && root.sort-column == index: IconDisplay {
+                            icon: root.sort-direction < 0 ? IconSet.ChevronUp : IconSet.ChevronDown;
+                            size: Theme.typography-body-sm;
+                            stroke: Theme.ink-subtle;
                         }
                         Rectangle {
                             horizontal-stretch: 1;
@@ -155,11 +134,6 @@ export component Table inherits Rectangle {
 
         Separator { }
 
-        list-viewport := Rectangle {
-            border-bottom-left-radius: Theme.rounded-md;
-            border-bottom-right-radius: Theme.rounded-md;
-
-            @children
-        }
+        @children
     }
 }

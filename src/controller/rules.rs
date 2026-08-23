@@ -2,9 +2,10 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use slint::{ComponentHandle, ModelRc, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 
 use crate::clash::api::{self, ApiError, RuleEntry};
+use crate::clash::stream;
 use crate::{MainWindow, TableRow};
 
 #[derive(Debug, Default)]
@@ -14,6 +15,7 @@ pub struct RulesViewState {
     error: String,
     next_token: u64,
     refresh_token: u64,
+    loaded_generation: Option<u64>,
 }
 
 pub type SharedRulesState = Arc<Mutex<RulesViewState>>;
@@ -34,6 +36,7 @@ pub fn clear_runtime(state: &SharedRulesState) {
     view.rules.clear();
     view.loading = false;
     view.error.clear();
+    view.loaded_generation = None;
     view.refresh_token = next_token(&mut view);
 }
 
@@ -58,11 +61,7 @@ impl RulesViewState {
                     rule.type_.clone().into(),
                     rule.proxy.clone().into(),
                 ])),
-                secondary_cells: ModelRc::new(VecModel::from(vec![
-                    "".into(),
-                    "".into(),
-                    "".into(),
-                ])),
+                secondary_content: "".into(),
             })
             .collect()
     }
@@ -70,9 +69,71 @@ impl RulesViewState {
 
 fn set_ui_model(window: &MainWindow, state: &RulesViewState) {
     let model = window.global::<crate::RulesModel>();
-    model.set_rules(ModelRc::new(VecModel::from(state.to_slint_rules())));
+    let rules = state.to_slint_rules();
+    let current = model.get_rules();
+    if let Some(rules_model) = current.as_any().downcast_ref::<VecModel<TableRow>>() {
+        sync_rules_model(rules_model, rules);
+    } else {
+        model.set_rules(ModelRc::new(VecModel::from(rules)));
+    }
+    set_ui_state(window, state);
+}
+
+fn set_ui_state(window: &MainWindow, state: &RulesViewState) {
+    let model = window.global::<crate::RulesModel>();
     model.set_loading(state.loading);
     model.set_error(state.error.clone().into());
+}
+
+fn sync_cells(model: &VecModel<slint::SharedString>, values: Vec<slint::SharedString>) {
+    let common = model.row_count().min(values.len());
+    for (index, value) in values.iter().take(common).cloned().enumerate() {
+        if model.row_data(index).as_ref() != Some(&value) {
+            model.set_row_data(index, value);
+        }
+    }
+    while model.row_count() > values.len() {
+        model.remove(model.row_count() - 1);
+    }
+    for value in values.into_iter().skip(common) {
+        model.push(value);
+    }
+}
+
+fn sync_rules_model(model: &VecModel<TableRow>, rules: Vec<TableRow>) {
+    let common = model.row_count().min(rules.len());
+    for index in 0..common {
+        let Some(mut next) = rules.get(index).cloned() else {
+            continue;
+        };
+        if let Some(current) = model.row_data(index) {
+            if let (Some(current_cells), Some(next_cells)) = (
+                current
+                    .cells
+                    .as_any()
+                    .downcast_ref::<VecModel<slint::SharedString>>(),
+                next.cells
+                    .as_any()
+                    .downcast_ref::<VecModel<slint::SharedString>>(),
+            ) {
+                let values = (0..next_cells.row_count())
+                    .filter_map(|cell| next_cells.row_data(cell))
+                    .collect();
+                sync_cells(current_cells, values);
+                next.cells = current.cells.clone();
+            }
+            if current.id == next.id && current.secondary_content == next.secondary_content {
+                continue;
+            }
+        }
+        model.set_row_data(index, next);
+    }
+    while model.row_count() > rules.len() {
+        model.remove(model.row_count() - 1);
+    }
+    for rule in rules.into_iter().skip(common) {
+        model.push(rule);
+    }
 }
 
 pub fn sync_ui(window: &MainWindow, state: &SharedRulesState) {
@@ -90,54 +151,50 @@ where
 }
 
 pub fn refresh_async(weak: Weak<MainWindow>, state: SharedRulesState) {
+    let generation = stream::runtime_generation();
     let token = {
         let mut view = lock_state(&state);
+        if view.loaded_generation == Some(generation) {
+            if let Some(window) = weak.upgrade() {
+                set_ui_state(&window, &view);
+            }
+            return;
+        }
         let token = next_token(&mut view);
         view.refresh_token = token;
         view.error.clear();
         view.loading = true;
         if let Some(window) = weak.upgrade() {
-            set_ui_model(&window, &view);
+            set_ui_state(&window, &view);
         }
         token
     };
 
-    let fallback_weak = weak.clone();
     let worker_state = state.clone();
-    let spawn_result = std::thread::Builder::new()
-        .name("rules-refresh".to_string())
-        .spawn(move || {
-            let result = api::get_rules().map(sort_rules);
-            invoke_ui(move || {
-                let Some(window) = weak.upgrade() else { return };
-                let mut view = lock_state(&worker_state);
-                if view.refresh_token != token {
-                    return;
-                }
-                match result {
-                    Ok(rules) => {
-                        view.rules = rules;
-                        view.error.clear();
-                    }
-                    Err(error) => {
-                        view.error = format_error("加载规则数据失败", &error);
-                    }
-                }
-                view.loading = false;
-                set_ui_model(&window, &view);
-            });
-        });
-
-    if let Err(error) = spawn_result {
-        let mut view = lock_state(&state);
-        if view.refresh_token == token {
-            view.loading = false;
-            view.error = format!("启动规则刷新线程失败：{error}");
-            if let Some(window) = fallback_weak.upgrade() {
-                set_ui_model(&window, &view);
+    crate::runtime::spawn_blocking(move || {
+        let result = api::get_rules().map(sort_rules);
+        invoke_ui(move || {
+            let Some(window) = weak.upgrade() else { return };
+            let mut view = lock_state(&worker_state);
+            if view.refresh_token != token {
+                return;
             }
-        }
-    }
+            match result {
+                Ok(rules) => {
+                    view.rules = rules;
+                    view.error.clear();
+                    view.loaded_generation = Some(generation);
+                    view.loading = false;
+                    set_ui_model(&window, &view);
+                }
+                Err(error) => {
+                    view.error = format_error("加载规则数据失败", &error);
+                    view.loading = false;
+                    set_ui_state(&window, &view);
+                }
+            }
+        });
+    });
 }
 
 fn format_error(prefix: &str, error: &ApiError) -> String {
@@ -146,8 +203,19 @@ fn format_error(prefix: &str, error: &ApiError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_runtime, new_state, sort_rules};
+    use super::{clear_runtime, new_state, sort_rules, sync_rules_model};
     use crate::clash::api::RuleEntry;
+    use crate::TableRow;
+    use slint::{Model, ModelRc, SharedString, VecModel};
+    use std::rc::Rc;
+
+    fn table_row(id: &str, payload: &str) -> TableRow {
+        TableRow {
+            id: id.into(),
+            cells: ModelRc::new(VecModel::from(vec![SharedString::from(payload)])),
+            secondary_content: "".into(),
+        }
+    }
 
     #[test]
     fn sorts_rules_by_index() {
@@ -184,6 +252,7 @@ mod tests {
             });
             view.loading = true;
             view.error = "旧错误".to_string();
+            view.loaded_generation = Some(7);
             view.refresh_token
         };
 
@@ -193,6 +262,31 @@ mod tests {
         assert!(view.rules.is_empty());
         assert!(!view.loading);
         assert!(view.error.is_empty());
+        assert!(view.loaded_generation.is_none());
         assert_ne!(view.refresh_token, previous_token);
+    }
+
+    #[test]
+    fn stable_rule_model_reuses_top_level_and_cell_models() {
+        let cells = Rc::new(VecModel::from(vec![SharedString::from("旧规则")]));
+        let rows = Rc::new(VecModel::from(vec![TableRow {
+            id: "rule-0".into(),
+            cells: ModelRc::from(cells.clone()),
+            secondary_content: "".into(),
+        }]));
+        let identity = ModelRc::from(rows.clone());
+
+        sync_rules_model(
+            &rows,
+            vec![table_row("rule-0", "新规则"), table_row("rule-1", "第二条")],
+        );
+
+        assert_eq!(identity, ModelRc::from(rows.clone()));
+        assert_eq!(rows.row_count(), 2);
+        assert_eq!(
+            rows.row_data(0).unwrap().cells,
+            ModelRc::from(cells.clone())
+        );
+        assert_eq!(cells.row_data(0), Some(SharedString::from("新规则")));
     }
 }

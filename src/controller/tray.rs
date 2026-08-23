@@ -143,14 +143,14 @@ fn refresh_home_proxy_status() {
         let home = window.global::<crate::HomeModel>();
         home.set_system_proxy(status.system);
         home.set_tun_proxy(status.tun);
-        home.set_core_running(core::get_port().is_some());
+        home.set_core_running(core::is_ready());
     }
     refresh_runtime_state();
 }
 
 /// 根据核心会话状态刷新主页和托盘代理操作的可用性。
 pub fn refresh_runtime_state() {
-    let enabled = core::get_port().is_some();
+    let enabled = core::is_ready();
     if let Some(tray) = tray() {
         tray.set_core_running(enabled);
     }
@@ -193,7 +193,7 @@ pub fn set_system_proxy(enabled: bool) {
 /// 按当前 Clash 配置恢复持久化的系统代理状态。
 pub fn restore_system_proxy() {
     let cfg = config::get();
-    if !cfg.proxy_status.system {
+    if !cfg.proxy_status.system || !core::is_ready() {
         return;
     }
     let result = proxy_endpoint().and_then(|endpoint| {
@@ -206,8 +206,7 @@ pub fn restore_system_proxy() {
         )
     });
     if let Err(error) = result {
-        crate::log::error(format_args!("启动时恢复系统代理失败：{error}"));
-        config::update(|c| c.proxy_status.system = false);
+        crate::log::error(format_args!("核心启动时恢复系统代理失败：{error}"));
     }
     refresh_home_proxy_status();
 }
@@ -324,11 +323,6 @@ pub fn show_main() {
 
 /// 退出：清除系统代理、停止核心并退出事件循环。
 pub fn quit() {
-    if config::get().proxy_status.system {
-        if let Err(error) = clear_system_proxy() {
-            crate::log::error(format_args!("退出时清除系统代理失败：{error}"));
-        }
-    }
     core::stop_core();
     let _ = slint::quit_event_loop();
 }
@@ -356,8 +350,10 @@ pub fn init(root: PathBuf, window: slint::Weak<MainWindow>, tray: Option<&ClashT
     tray.on_toggle_tun(toggle_tun);
     tray.on_quit(quit);
     refresh_home_proxy_status();
-    if let Ok(configs) = api::get_configs() {
-        set_outbound_mode(&configs.mode);
+    if core::is_ready() {
+        if let Ok(configs) = api::get_configs() {
+            set_outbound_mode(&configs.mode);
+        }
     }
 }
 

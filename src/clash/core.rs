@@ -2,11 +2,16 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::app::config;
 use crate::constants::{CLASH_DIR, RUNTIME_DIR};
 
 use super::config_merge;
+
+const CORE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const CORE_READY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 // Clash 核心管理错误，携带必要上下文以便定位启动或配置生成失败。
 #[derive(Debug)]
@@ -18,6 +23,7 @@ pub enum CoreError {
     CoreMissing,
     Spawn(std::io::Error),
     ProcessGuard(String),
+    ReadyTimeout(String),
     Lock,
 }
 
@@ -31,6 +37,9 @@ impl std::fmt::Display for CoreError {
             Self::CoreMissing => write!(formatter, "未找到 clash 核心可执行文件"),
             Self::Spawn(error) => write!(formatter, "启动核心失败: {error}"),
             Self::ProcessGuard(error) => write!(formatter, "监管核心进程失败：{error}"),
+            Self::ReadyTimeout(error) => {
+                write!(formatter, "等待 clash 核心就绪超时：{error}")
+            }
             Self::Lock => write!(formatter, "会话锁被污染"),
         }
     }
@@ -46,6 +55,7 @@ pub struct CoreSession {
     pub secret: String,
     pub child: Child,
     process_guard: crate::platform::CoreProcessGuard,
+    ready: bool,
 }
 
 // 控制端点快照，保证端口和密钥来自同一会话。
@@ -58,6 +68,14 @@ pub struct ControllerSnapshot {
 // 全局核心会话，应用进程中最多运行一个核心实例。
 static SESSION: Mutex<Option<CoreSession>> = Mutex::new(None);
 static STOP_HANDLER: RwLock<Option<Arc<dyn Fn() + Send + Sync>>> = RwLock::new(None);
+static READY_HANDLER: RwLock<Option<Arc<dyn Fn() + Send + Sync>>> = RwLock::new(None);
+
+/// 注册核心就绪处理器，在 version 接口检查成功后调用。
+pub fn set_ready_handler(handler: impl Fn() + Send + Sync + 'static) {
+    if let Ok(mut current) = READY_HANDLER.write() {
+        *current = Some(Arc::new(handler));
+    }
+}
 
 /// 注册核心停止处理器，由应用上下文负责清理运行时页面数据。
 pub fn set_stop_handler(handler: impl Fn() + Send + Sync + 'static) {
@@ -76,6 +94,16 @@ fn notify_stop_handler() {
     }
 }
 
+fn notify_ready_handler() {
+    let handler = READY_HANDLER
+        .read()
+        .ok()
+        .and_then(|current| current.as_ref().cloned());
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
 // 读取当前核心控制端点。
 pub fn get_controller_snapshot() -> Option<ControllerSnapshot> {
     SESSION.lock().ok().and_then(|guard| {
@@ -86,22 +114,73 @@ pub fn get_controller_snapshot() -> Option<ControllerSnapshot> {
     })
 }
 
-// 读取当前核心端口。
-#[allow(dead_code)]
-pub fn get_port() -> Option<u16> {
+/// 判断当前核心是否已通过 version 接口就绪检查。
+pub(crate) fn is_ready() -> bool {
     SESSION
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|session| session.port))
+        .and_then(|guard| guard.as_ref().map(|session| session.ready))
+        .unwrap_or(false)
+}
+
+// 读取当前核心端口。
+#[allow(dead_code)]
+pub fn get_port() -> Option<u16> {
+    SESSION.lock().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .filter(|session| session.ready)
+            .map(|session| session.port)
+    })
 }
 
 // 读取当前核心密钥。
 #[allow(dead_code)]
 pub fn get_secret() -> Option<String> {
-    SESSION
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|session| session.secret.clone()))
+    SESSION.lock().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .filter(|session| session.ready)
+            .map(|session| session.secret.clone())
+    })
+}
+
+fn wait_for_core_ready_with<P>(
+    timeout: Duration,
+    retry_interval: Duration,
+    mut probe: P,
+) -> Result<(), CoreError>
+where
+    P: FnMut(Duration) -> Result<(), String>,
+{
+    let deadline = Instant::now() + timeout;
+    let mut last_error = "未执行 version 接口检查".to_string();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(CoreError::ReadyTimeout(last_error));
+        }
+
+        match probe(remaining) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(CoreError::ReadyTimeout(last_error));
+        }
+        thread::sleep(retry_interval.min(remaining));
+    }
+}
+
+fn wait_for_core_ready() -> Result<(), CoreError> {
+    wait_for_core_ready_with(CORE_READY_TIMEOUT, CORE_READY_RETRY_INTERVAL, |timeout| {
+        super::api::get_version_with_timeout(timeout)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
 }
 
 // 查找 resources/clash 下的平台核心文件。
@@ -121,11 +200,11 @@ pub fn find_core(root: &Path) -> Option<PathBuf> {
 
 // 生成 16 位字母数字密钥。
 pub fn generate_secret() -> String {
-    use rand::Rng;
+    use rand::RngExt;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..16)
-        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+        .map(|_| rng.sample(rand::distr::Alphanumeric) as char)
         .collect()
 }
 
@@ -195,15 +274,26 @@ pub fn start_core(root: &Path) -> Result<(), CoreError> {
         secret,
         child,
         process_guard,
+        ready: false,
     });
     drop(session);
-    crate::clash::api::start_streams();
+
+    if let Err(error) = wait_for_core_ready() {
+        stop_core();
+        return Err(error);
+    }
+    let mut session = SESSION.lock().map_err(|_| CoreError::Lock)?;
+    let current = session.as_mut().ok_or(CoreError::Lock)?;
+    current.ready = true;
+    drop(session);
+    crate::clash::stream::start();
+    notify_ready_handler();
     Ok(())
 }
 
 // 停止核心并清理会话。
 pub fn stop_core() {
-    crate::clash::api::reset_streams();
+    crate::clash::stream::reset();
     let current = SESSION.lock().ok().and_then(|mut session| session.take());
     if let Some(mut current) = current {
         terminate_core_process(&current.process_guard, &mut current.child);
@@ -248,8 +338,10 @@ pub fn on_config_changed(root: &Path) -> Result<(), CoreError> {
 mod tests {
     use super::*;
     use crate::constants::{ASSETS_DIR, CLASH_DIR, FIXED_YAML_PATH, RUNTIME_DIR};
+    use std::cell::Cell;
     use std::fs;
     use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn spawn_long_running_child() -> Child {
         #[cfg(windows)]
@@ -277,6 +369,66 @@ mod tests {
     #[test]
     fn secret_has_expected_length() {
         assert_eq!(generate_secret().len(), 16);
+    }
+
+    #[test]
+    fn readiness_probe_retries_until_success() {
+        let attempts = Cell::new(0);
+
+        wait_for_core_ready_with(Duration::from_secs(1), Duration::ZERO, |_| {
+            let current = attempts.get() + 1;
+            attempts.set(current);
+            if current < 3 {
+                Err(format!("第 {current} 次检查失败"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(CORE_READY_RETRY_INTERVAL, Duration::from_secs(1));
+        assert_eq!(CORE_READY_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn readiness_probe_returns_last_error_after_timeout() {
+        let error =
+            wait_for_core_ready_with(Duration::from_millis(20), Duration::from_millis(1), |_| {
+                Err("核心尚未监听".to_string())
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::ReadyTimeout(message) if message == "核心尚未监听"
+        ));
+    }
+
+    #[test]
+    fn lifecycle_handlers_receive_ready_and_stop_events() {
+        let ready_calls = Arc::new(AtomicUsize::new(0));
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        set_ready_handler({
+            let ready_calls = ready_calls.clone();
+            move || {
+                ready_calls.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        set_stop_handler({
+            let stop_calls = stop_calls.clone();
+            move || {
+                stop_calls.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        notify_ready_handler();
+        notify_stop_handler();
+
+        assert_eq!(ready_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(stop_calls.load(Ordering::Relaxed), 1);
+        set_ready_handler(|| {});
+        set_stop_handler(|| {});
     }
 
     #[test]
