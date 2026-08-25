@@ -349,243 +349,220 @@ fn encode_path_segment(value: &str) -> String {
 }
 
 // ===== Clash API 端点 =====
-pub fn get_version() -> Result<Version, ApiError> {
-    get_version_with_timeout(NORMAL_REQUEST_TIMEOUT)
+pub async fn get_version() -> Result<Version, ApiError> {
+    get_version_request(NORMAL_REQUEST_TIMEOUT).await
 }
 
+/// 仅供同步核心启动流程使用的就绪探测包装。
 pub(crate) fn get_version_with_timeout(timeout: Duration) -> Result<Version, ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        http_client::get_json(
-            &controller.http_url("/version"),
-            Some(&controller.authorization),
-            None,
-            timeout,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+    crate::runtime::block(get_version_request(timeout))
 }
 
-pub fn get_proxies() -> Result<std::collections::HashMap<String, ProxyEntry>, ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let response: ProxiesResponse = http_client::get_json(
-            &controller.http_url("/proxies"),
-            Some(&controller.authorization),
-            None,
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)?;
-        Ok(response.proxies)
-    })
+async fn get_version_request(timeout: Duration) -> Result<Version, ApiError> {
+    let controller = controller()?;
+    http_client::get_json(
+        &controller.http_url("/version"),
+        Some(&controller.authorization),
+        None,
+        timeout,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
-pub fn get_proxy_delay(name: &str, url: &str, timeout: u32) -> Result<u16, ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let path = format!("/proxies/{}/delay", encode_path_segment(name));
-        let timeout_str = timeout.to_string();
-        let query = [("url", url), ("timeout", timeout_str.as_str())];
-        #[derive(Deserialize)]
-        struct DelayResponse {
-            delay: u16,
-        }
-        let response: DelayResponse = http_client::get_json(
-            &controller.http_url(&path),
-            Some(&controller.authorization),
-            Some(&query),
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)?;
-        Ok(response.delay)
-    })
+pub async fn get_proxies() -> Result<std::collections::HashMap<String, ProxyEntry>, ApiError> {
+    let controller = controller()?;
+    let response: ProxiesResponse = http_client::get_json(
+        &controller.http_url("/proxies"),
+        Some(&controller.authorization),
+        None,
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)?;
+    Ok(response.proxies)
 }
 
-pub fn get_group_delay(
+pub async fn get_proxy_delay(name: &str, url: &str, timeout: u32) -> Result<u16, ApiError> {
+    let controller = controller()?;
+    let path = format!("/proxies/{}/delay", encode_path_segment(name));
+    let timeout_str = timeout.to_string();
+    let query = [("url", url), ("timeout", timeout_str.as_str())];
+    #[derive(Deserialize)]
+    struct DelayResponse {
+        delay: u16,
+    }
+    let response: DelayResponse = http_client::get_json(
+        &controller.http_url(&path),
+        Some(&controller.authorization),
+        Some(&query),
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)?;
+    Ok(response.delay)
+}
+
+pub async fn get_group_delay(
     group: &str,
     url: &str,
     timeout: u32,
 ) -> Result<std::collections::HashMap<String, u16>, ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let path = format!("/group/{}/delay", encode_path_segment(group));
-        let timeout_str = timeout.to_string();
-        let query = [("url", url), ("timeout", timeout_str.as_str())];
-        http_client::get_json(
-            &controller.http_url(&path),
-            Some(&controller.authorization),
-            Some(&query),
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+    let controller = controller()?;
+    let path = format!("/group/{}/delay", encode_path_segment(group));
+    let timeout_str = timeout.to_string();
+    let query = [("url", url), ("timeout", timeout_str.as_str())];
+    http_client::get_json(
+        &controller.http_url(&path),
+        Some(&controller.authorization),
+        Some(&query),
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
-pub fn select_proxy(group: &str, node: &str) -> Result<(), ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let path = format!("/proxies/{}", encode_path_segment(group));
-        let body = serde_json::json!({ "name": node });
-        http_client::request_status(
-            reqwest::Method::PUT,
-            &controller.http_url(&path),
-            Some(&controller.authorization),
-            None,
-            Some(&body),
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn select_proxy(group: &str, node: &str) -> Result<(), ApiError> {
+    let controller = controller()?;
+    let path = format!("/proxies/{}", encode_path_segment(group));
+    let body = serde_json::json!({ "name": node });
+    http_client::request_status(
+        reqwest::Method::PUT,
+        &controller.http_url(&path),
+        Some(&controller.authorization),
+        None,
+        Some(&body),
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
-pub fn get_rules() -> Result<Vec<RuleEntry>, ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let response: RulesResponse = http_client::get_json(
-            &controller.http_url("/rules"),
-            Some(&controller.authorization),
-            None,
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)?;
-        Ok(response.rules)
-    })
+pub async fn get_rules() -> Result<Vec<RuleEntry>, ApiError> {
+    let controller = controller()?;
+    let response: RulesResponse = http_client::get_json(
+        &controller.http_url("/rules"),
+        Some(&controller.authorization),
+        None,
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)?;
+    Ok(response.rules)
 }
 
-pub fn get_configs() -> Result<Configs, ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        http_client::get_json(
-            &controller.http_url("/configs"),
-            Some(&controller.authorization),
-            None,
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn get_configs() -> Result<Configs, ApiError> {
+    let controller = controller()?;
+    http_client::get_json(
+        &controller.http_url("/configs"),
+        Some(&controller.authorization),
+        None,
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
-pub fn put_mode(mode: &str) -> Result<(), ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let body = serde_json::json!({ "mode": mode });
-        http_client::request_status(
-            reqwest::Method::PATCH,
-            &controller.http_url("/configs"),
-            Some(&controller.authorization),
-            None,
-            Some(&body),
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn put_mode(mode: &str) -> Result<(), ApiError> {
+    let controller = controller()?;
+    let body = serde_json::json!({ "mode": mode });
+    http_client::request_status(
+        reqwest::Method::PATCH,
+        &controller.http_url("/configs"),
+        Some(&controller.authorization),
+        None,
+        Some(&body),
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
 #[allow(dead_code)]
-pub fn patch_configs(patch: &PatchConfigs) -> Result<(), ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let body = serde_json::to_value(patch).map_err(ApiError::Json)?;
-        http_client::request_status(
-            reqwest::Method::PATCH,
-            &controller.http_url("/configs"),
-            Some(&controller.authorization),
-            None,
-            Some(&body),
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn patch_configs(patch: &PatchConfigs) -> Result<(), ApiError> {
+    let controller = controller()?;
+    let body = serde_json::to_value(patch).map_err(ApiError::Json)?;
+    http_client::request_status(
+        reqwest::Method::PATCH,
+        &controller.http_url("/configs"),
+        Some(&controller.authorization),
+        None,
+        Some(&body),
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
 /// 更新核心
-pub fn upgrade() -> Result<(), ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        http_client::request_status(
-            reqwest::Method::POST,
-            &controller.http_url("/upgrade"),
-            Some(&controller.authorization),
-            None,
-            None,
-            UPGRADE_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn upgrade() -> Result<(), ApiError> {
+    let controller = controller()?;
+    http_client::request_status(
+        reqwest::Method::POST,
+        &controller.http_url("/upgrade"),
+        Some(&controller.authorization),
+        None,
+        None,
+        UPGRADE_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
 /// 请求核心下载并解压在线面板。
-pub fn upgrade_ui() -> Result<(), ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        http_client::request_status(
-            reqwest::Method::POST,
-            &controller.http_url("/upgrade/ui"),
-            Some(&controller.authorization),
-            None,
-            None,
-            UPGRADE_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn upgrade_ui() -> Result<(), ApiError> {
+    let controller = controller()?;
+    http_client::request_status(
+        reqwest::Method::POST,
+        &controller.http_url("/upgrade/ui"),
+        Some(&controller.authorization),
+        None,
+        None,
+        UPGRADE_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
 #[allow(dead_code)]
-pub fn get_connections() -> Result<ConnectionSnapshot, ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        websocket::read_first_json(
-            &controller.ws_url("/connections"),
-            Some(&controller.authorization),
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Ws)
-    })
+pub async fn get_connections() -> Result<ConnectionSnapshot, ApiError> {
+    let controller = controller()?;
+    websocket::read_first_json(
+        &controller.ws_url("/connections"),
+        Some(&controller.authorization),
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Ws)
 }
 
-pub fn close_all_connections() -> Result<(), ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        http_client::request_status(
-            reqwest::Method::DELETE,
-            &controller.http_url("/connections"),
-            Some(&controller.authorization),
-            None,
-            None,
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn close_all_connections() -> Result<(), ApiError> {
+    let controller = controller()?;
+    http_client::request_status(
+        reqwest::Method::DELETE,
+        &controller.http_url("/connections"),
+        Some(&controller.authorization),
+        None,
+        None,
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
-pub fn close_connection(id: &str) -> Result<(), ApiError> {
-    crate::runtime::block(async {
-        let controller = controller()?;
-        let path = format!("/connections/{}", encode_path_segment(id));
-        http_client::request_status(
-            reqwest::Method::DELETE,
-            &controller.http_url(&path),
-            Some(&controller.authorization),
-            None,
-            None,
-            NORMAL_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(ApiError::Http)
-    })
+pub async fn close_connection(id: &str) -> Result<(), ApiError> {
+    let controller = controller()?;
+    let path = format!("/connections/{}", encode_path_segment(id));
+    http_client::request_status(
+        reqwest::Method::DELETE,
+        &controller.http_url(&path),
+        Some(&controller.authorization),
+        None,
+        None,
+        NORMAL_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(ApiError::Http)
 }
 
 #[cfg(test)]

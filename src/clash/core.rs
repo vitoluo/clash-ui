@@ -231,8 +231,12 @@ fn find_free_port() -> u16 {
 
 // 启动核心：先生成运行时配置，无启用配置时不启动进程。
 pub fn start_core(root: &Path) -> Result<(), CoreError> {
-    config_merge::merge_config(root)?;
-    let cfg = config::get();
+    let cfg = config_merge::merge_config(root)?;
+    start_core_merged(root, &cfg)
+}
+
+// 使用已合并的配置快照启动核心；调用方必须先完成配置合并。
+fn start_core_merged(root: &Path, cfg: &config::AppConfig) -> Result<(), CoreError> {
     if !cfg.configs.iter().any(|entry| entry.enabled) {
         return Ok(());
     }
@@ -314,19 +318,26 @@ fn terminate_core_process(guard: &crate::platform::CoreProcessGuard, child: &mut
 // 重启核心。
 pub fn restart_core(root: &Path) -> Result<(), CoreError> {
     stop_core();
-    start_core(root)
+    let cfg = config_merge::merge_config(root)?;
+    start_core_merged(root, &cfg)
+}
+
+// 使用已合并的配置快照重启核心；不重复读取或合并配置。
+fn restart_core_merged(root: &Path, cfg: &config::AppConfig) -> Result<(), CoreError> {
+    stop_core();
+    start_core_merged(root, cfg)
 }
 
 // 配置变更统一入口：重新合并配置，并按启用状态启动、重启或停止核心。
 pub fn on_config_changed(root: &Path) -> Result<(), CoreError> {
-    config_merge::merge_config(root)?;
-    let cfg = config::get();
+    // 先合并，失败时保留旧核心；后续生命周期操作只使用这一份快照。
+    let cfg = config_merge::merge_config(root)?;
     if cfg.configs.iter().any(|entry| entry.enabled) {
         let running = SESSION.lock().map_err(|_| CoreError::Lock)?.is_some();
         if running {
-            restart_core(root)?;
+            restart_core_merged(root, &cfg)?;
         } else {
-            start_core(root)?;
+            start_core_merged(root, &cfg)?;
         }
     } else {
         stop_core();

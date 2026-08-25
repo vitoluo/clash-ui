@@ -86,18 +86,16 @@ pub async fn request_status(
 }
 
 /// 下载文本，并由调用方指定总超时。
-pub fn download_text(url: &str, timeout: Duration) -> Result<String, Error> {
-    crate::runtime::block(async {
-        let response = client()
-            .get(url)
-            .timeout(timeout)
-            .send()
-            .await
-            .map_err(Error::Request)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(Error::Status(status.as_u16(), status.to_string()));
-        }
-        response.text().await.map_err(Error::Request)
-    })
+pub async fn download_text(url: &str, timeout: Duration) -> Result<String, Error> {
+    let response = client()
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(Error::Request)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(Error::Status(status.as_u16(), status.to_string()));
+    }
+    response.text().await.map_err(Error::Request)
 }

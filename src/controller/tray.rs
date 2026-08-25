@@ -121,9 +121,10 @@ pub(crate) fn proxy_endpoint_from_configs(configs: &api::Configs) -> Result<Prox
 }
 
 /// 从 Clash API 获取代理端点；失败时不使用旧配置或固定地址。
-pub(crate) fn proxy_endpoint() -> Result<ProxyEndpoint, String> {
-    let configs =
-        api::get_configs().map_err(|error| format!("获取 Clash 代理配置失败：{error}"))?;
+pub(crate) async fn proxy_endpoint() -> Result<ProxyEndpoint, String> {
+    let configs = api::get_configs()
+        .await
+        .map_err(|error| format!("获取 Clash 代理配置失败：{error}"))?;
     proxy_endpoint_from_configs(&configs)
 }
 
@@ -168,26 +169,52 @@ pub fn set_outbound_mode(mode: &str) {
 /// 设置系统代理开关（平台动作成功后再写配置）。
 pub fn set_system_proxy(enabled: bool) {
     let cfg = config::get();
-    let result = if enabled {
-        proxy_endpoint().and_then(|endpoint| {
+    let bypass_list = cfg.settings.proxy.bypass_list;
+    crate::runtime::spawn_task(async move {
+        let result = apply_system_proxy(enabled, bypass_list).await;
+
+        if result.is_ok() {
+            let persist = crate::runtime::spawn_blocking(move || {
+                config::update(|cfg| cfg.proxy_status.system = enabled);
+            })
+            .await
+            .map_err(|error| format!("保存系统代理状态失败：{error}"));
+            if let Err(error) = persist {
+                invoke_ui(move || {
+                    crate::log::error(format_args!("设置系统代理失败：{error}"));
+                    refresh_home_proxy_status();
+                });
+                return;
+            }
+        }
+        invoke_ui(move || {
+            if let Err(error) = result {
+                crate::log::error(format_args!("设置系统代理失败：{error}"));
+            }
+            refresh_home_proxy_status();
+        });
+    });
+}
+
+async fn apply_system_proxy(enabled: bool, bypass_list: Vec<String>) -> Result<(), String> {
+    if enabled {
+        let endpoint = proxy_endpoint().await?;
+        crate::runtime::spawn_blocking(move || {
             platform::set_system_proxy(
                 &endpoint.host,
                 true,
                 endpoint.ports.http,
                 endpoint.ports.socks,
-                &cfg.settings.proxy.bypass_list,
+                &bypass_list,
             )
         })
+        .await
+        .map_err(|error| format!("设置系统代理任务失败：{error}"))?
     } else {
-        clear_system_proxy()
-    };
-    if let Err(error) = result {
-        crate::log::error(format_args!("设置系统代理失败：{error}"));
-        refresh_home_proxy_status();
-        return;
+        crate::runtime::spawn_blocking(clear_system_proxy)
+            .await
+            .map_err(|error| format!("清除系统代理任务失败：{error}"))?
     }
-    config::update(|c| c.proxy_status.system = enabled);
-    refresh_home_proxy_status();
 }
 
 /// 按当前 Clash 配置恢复持久化的系统代理状态。
@@ -196,19 +223,40 @@ pub fn restore_system_proxy() {
     if !cfg.proxy_status.system || !core::is_ready() {
         return;
     }
-    let result = proxy_endpoint().and_then(|endpoint| {
+    let bypass_list = cfg.settings.proxy.bypass_list;
+    crate::runtime::spawn_task(async move {
+        let result = restore_system_proxy_async(bypass_list).await;
+        invoke_ui(move || {
+            if let Err(error) = result {
+                crate::log::error(format_args!("核心启动时恢复系统代理失败：{error}"));
+            }
+            refresh_home_proxy_status();
+        });
+    });
+}
+
+async fn restore_system_proxy_async(bypass_list: Vec<String>) -> Result<(), String> {
+    let endpoint = proxy_endpoint().await?;
+    crate::runtime::spawn_blocking(move || {
         platform::set_system_proxy(
             &endpoint.host,
             true,
             endpoint.ports.http,
             endpoint.ports.socks,
-            &cfg.settings.proxy.bypass_list,
+            &bypass_list,
         )
-    });
-    if let Err(error) = result {
-        crate::log::error(format_args!("核心启动时恢复系统代理失败：{error}"));
+    })
+    .await
+    .map_err(|error| format!("恢复系统代理任务失败：{error}"))?
+}
+
+fn invoke_ui<F>(callback: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    if let Err(error) = slint::invoke_from_event_loop(callback) {
+        crate::log::error(format_args!("托盘 UI 回调失败：{error}"));
     }
-    refresh_home_proxy_status();
 }
 
 /// 清除平台系统代理，不读取 Clash API，也不修改持久化意图。
@@ -223,27 +271,36 @@ pub fn toggle_system_proxy() {
 
 /// 设置 TUN 代理开关（写配置并重启核心注入 tun.enable）。
 pub fn set_tun(enabled: bool) {
-    if enabled && !platform::is_admin() {
-        WINDOW.with(|w| {
-            if let Some(window) = w.borrow().as_ref().and_then(|weak| weak.upgrade()) {
-                let _ = window.show();
-                window
-                    .global::<crate::AppState>()
-                    .set_tun_confirm_open(true);
-            }
-        });
-        refresh_home_proxy_status();
-        return;
-    }
-
-    config::update(|c| c.proxy_status.tun = enabled);
     let root = ROOT.with(|r| r.borrow().clone());
-    if let Some(root) = root {
-        if let Err(e) = core::restart_core(&root) {
-            crate::log::error(format_args!("应用 TUN 配置失败: {e}"));
+    crate::runtime::spawn_blocking(move || {
+        if enabled && !platform::is_admin() {
+            invoke_ui(|| {
+                WINDOW.with(|w| {
+                    if let Some(window) = w.borrow().as_ref().and_then(|weak| weak.upgrade()) {
+                        let _ = window.show();
+                        window
+                            .global::<crate::AppState>()
+                            .set_tun_confirm_open(true);
+                    }
+                });
+                refresh_home_proxy_status();
+            });
+            return;
         }
-    }
-    refresh_home_proxy_status();
+
+        config::update(|c| c.proxy_status.tun = enabled);
+        let result = root
+            .as_deref()
+            .map(core::restart_core)
+            .transpose()
+            .map_err(|error| error.to_string());
+        invoke_ui(move || {
+            if let Err(error) = result {
+                crate::log::error(format_args!("应用 TUN 配置失败: {error}"));
+            }
+            refresh_home_proxy_status();
+        });
+    });
 }
 
 /// 确认非管理员开启 TUN，失败时回滚配置并恢复系统代理。
@@ -276,11 +333,17 @@ pub fn set_mode(mode: &str) {
         crate::log::error(format_args!("设置出站模式失败：Clash 核心未运行"));
         return;
     }
-    if let Err(e) = api::put_mode(mode) {
-        crate::log::error(format_args!("设置出站模式 {mode} 失败: {e}"));
-        return;
-    }
-    set_outbound_mode(mode);
+    let mode = mode.to_string();
+    crate::runtime::spawn_task(async move {
+        let result = api::put_mode(&mode).await;
+        invoke_ui(move || {
+            if let Err(error) = result {
+                crate::log::error(format_args!("设置出站模式 {mode} 失败: {error}"));
+                return;
+            }
+            set_outbound_mode(&mode);
+        });
+    });
 }
 
 /// 复制指定终端的代理环境变量命令到剪贴板。
@@ -289,23 +352,30 @@ pub fn copy_proxy_env(terminal: Terminal) {
         crate::log::error(format_args!("获取代理环境变量失败：Clash 核心未运行"));
         return;
     }
-    let endpoint = match proxy_endpoint() {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            crate::log::error(format_args!("获取代理环境变量失败：{error}"));
+    crate::runtime::spawn_task(async move {
+        let endpoint = match proxy_endpoint().await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                crate::log::error(format_args!("获取代理环境变量失败：{error}"));
+                return;
+            }
+        };
+        if endpoint.ports.http.is_none() && endpoint.ports.socks.is_none() {
+            crate::log::error(format_args!("没有可用的代理端口，无法复制代理环境变量"));
             return;
         }
-    };
-    if endpoint.ports.http.is_none() && endpoint.ports.socks.is_none() {
-        crate::log::error(format_args!("没有可用的代理端口，无法复制代理环境变量"));
-        return;
-    }
-    platform::set_clipboard_text(&proxy_env_command(
-        terminal,
-        &endpoint.host,
-        endpoint.ports.http,
-        endpoint.ports.socks,
-    ));
+        let command = proxy_env_command(
+            terminal,
+            &endpoint.host,
+            endpoint.ports.http,
+            endpoint.ports.socks,
+        );
+        let result =
+            crate::runtime::spawn_blocking(move || platform::set_clipboard_text(&command)).await;
+        if let Err(error) = result {
+            crate::log::error(format_args!("复制代理环境变量任务失败：{error}"));
+        }
+    });
 }
 
 /// 显示主界面（经事件循环线程操作窗口）。
@@ -351,9 +421,14 @@ pub fn init(root: PathBuf, window: slint::Weak<MainWindow>, tray: Option<&ClashT
     tray.on_quit(quit);
     refresh_home_proxy_status();
     if core::is_ready() {
-        if let Ok(configs) = api::get_configs() {
-            set_outbound_mode(&configs.mode);
-        }
+        crate::runtime::spawn_task(async {
+            match api::get_configs().await {
+                Ok(configs) => invoke_ui(move || set_outbound_mode(&configs.mode)),
+                Err(error) => {
+                    crate::log::error(format_args!("初始化托盘出站模式失败：{error}"));
+                }
+            }
+        });
     }
 }
 

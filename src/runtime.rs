@@ -1,18 +1,70 @@
+use std::any::Any;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::OnceLock;
 
+use futures_util::FutureExt;
 use tokio::runtime::Runtime;
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 fn runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| Runtime::new().expect("创建 tokio runtime 失败"))
+    RUNTIME.get_or_init(|| {
+        install_abort_panic_hook();
+        Runtime::new().unwrap_or_else(|error| {
+            crate::log::error(format_args!("创建 Tokio 运行时失败：{error}"));
+            panic!("创建 Tokio 运行时失败：{error}");
+        })
+    })
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message
+    } else {
+        "未知 panic"
+    }
+}
+
+#[cfg(panic = "abort")]
+fn install_abort_panic_hook() {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let message = panic_message(info.payload());
+        if let Some(location) = info.location() {
+            crate::log::error(format_args!(
+                "应用发生 panic：{message}（{}:{}）",
+                location.file(),
+                location.line()
+            ));
+        } else {
+            crate::log::error(format_args!("应用发生 panic：{message}"));
+        }
+        previous(info);
+    }));
+}
+
+#[cfg(not(panic = "abort"))]
+fn install_abort_panic_hook() {}
+
+fn resume_panic(task_kind: &str, payload: Box<dyn Any + Send>) -> ! {
+    let message = panic_message(payload.as_ref());
+    crate::log::error(format_args!("{task_kind}发生 panic：{message}"));
+    panic::resume_unwind(payload)
 }
 
 /// 在共享运行时上阻塞执行异步任务。
 pub fn block<F: std::future::Future>(future: F) -> F::Output {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(future),
-        Err(_) => runtime().block_on(future),
+    let result = panic::catch_unwind(AssertUnwindSafe(
+        || match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.block_on(future),
+            Err(_) => runtime().block_on(future),
+        },
+    ));
+    match result {
+        Ok(output) => output,
+        Err(payload) => resume_panic("阻塞异步任务", payload),
     }
 }
 
@@ -22,7 +74,12 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    runtime().spawn(future)
+    runtime().spawn(async move {
+        match AssertUnwindSafe(future).catch_unwind().await {
+            Ok(output) => output,
+            Err(payload) => resume_panic("异步任务", payload),
+        }
+    })
 }
 
 /// 将阻塞任务提交到共享运行时的阻塞任务池。
@@ -31,16 +88,31 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    runtime().spawn_blocking(task)
+    runtime().spawn_blocking(move || match panic::catch_unwind(AssertUnwindSafe(task)) {
+        Ok(output) => output,
+        Err(payload) => resume_panic("阻塞任务", payload),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{block, spawn_blocking};
+    use super::{block, spawn_blocking, spawn_task};
 
     #[test]
     fn shared_blocking_pool_can_drive_sync_futures() {
         let task = spawn_blocking(|| block(async { 7_u8 }));
         assert_eq!(block(task).unwrap(), 7);
+    }
+
+    #[test]
+    fn async_task_panic_is_propagated() {
+        let task = spawn_task(async { panic!("异步任务测试 panic") });
+        assert!(block(task).unwrap_err().is_panic());
+    }
+
+    #[test]
+    fn blocking_task_panic_is_propagated() {
+        let task = spawn_blocking(|| panic!("阻塞任务测试 panic"));
+        assert!(block(task).unwrap_err().is_panic());
     }
 }

@@ -318,6 +318,9 @@ pub(crate) fn finish_operation(
     result: Result<String, String>,
     close_form: bool,
 ) {
+    if let Err(message) = &result {
+        crate::log::error(format_args!("{message}"));
+    }
     invoke_ui(move || {
         let Some(window) = weak.upgrade() else { return };
         let mut view = lock_state(&state);
@@ -455,8 +458,9 @@ pub fn submit_form(
         return;
     };
     let root = lock_state(&state).root.clone();
-    crate::runtime::spawn_blocking(move || {
-        let result = save_entry(&root, &editing_path, &name, &source_type, &source_uri)
+    crate::runtime::spawn_task(async move {
+        let result = save_entry_async(&root, &editing_path, &name, &source_type, &source_uri)
+            .await
             .map(|_| "覆写已保存".to_string())
             .map_err(|error| format!("保存覆写失败：{error}"));
         finish_operation(weak, state, token, result, true);
@@ -469,8 +473,9 @@ pub fn update(weak: Weak<MainWindow>, state: SharedOverrideState, path: String) 
         return;
     };
     let root = lock_state(&state).root.clone();
-    crate::runtime::spawn_blocking(move || {
-        let result = update_entry(&root, &path)
+    crate::runtime::spawn_task(async move {
+        let result = update_entry_async(&root, &path)
+            .await
             .map(|_| "覆写已更新".to_string())
             .map_err(|error| format!("更新覆写失败：{error}"));
         finish_operation(weak, state, token, result, false);
@@ -497,18 +502,43 @@ pub fn update_all(weak: Weak<MainWindow>, state: SharedOverrideState) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    crate::runtime::spawn_blocking(move || {
+    crate::runtime::spawn_task(async move {
         let entries = sorted_entries(&config::overrides());
         let mut failures = Vec::new();
         let mut enabled_updated = false;
         for entry in entries {
-            match update_entry_without_core(&root, &entry) {
-                Ok(()) => enabled_updated |= entry.enabled,
-                Err(error) => failures.push(format!("{}：{error}", display_name(&entry))),
+            let display_name = display_name(&entry);
+            let enabled = entry.enabled;
+            let result = match source::read_source(entry.source_type, &entry.source_uri).await {
+                Ok(content) => {
+                    if let Err(error) = source::validate_yaml(&content) {
+                        Err(error)
+                    } else {
+                        let root = root.clone();
+                        let entry_for_write = entry.clone();
+                        match crate::runtime::spawn_blocking(move || {
+                            update_entry_without_core(&root, &entry_for_write, &content)
+                        })
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => Err(format!("更新覆写任务失败：{error}")),
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => enabled_updated |= enabled,
+                Err(error) => failures.push(format!("{}：{error}", display_name)),
             }
         }
         if enabled_updated {
-            if let Err(error) = core::on_config_changed(&root) {
+            let result = crate::runtime::spawn_blocking(move || core::on_config_changed(&root))
+                .await
+                .map_err(|error| format!("核心联动任务失败：{error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            if let Err(error) = result {
                 failures.push(format!("核心联动失败：{error}"));
             }
         }
@@ -532,6 +562,9 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedOverrideState) {
             Some(_) => Err("选择的路径不是文件".to_string()),
             None => Ok(None),
         });
+        if let Err(error) = &result {
+            crate::log::error(format_args!("选择覆写源文件失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
@@ -606,7 +639,7 @@ pub fn edit(weak: Weak<MainWindow>, state: SharedOverrideState, path: String) {
     }
 }
 
-fn save_entry(
+async fn save_entry_async(
     root: &std::path::Path,
     editing_path: &str,
     name: &str,
@@ -627,8 +660,36 @@ fn save_entry(
         source_uri,
         "覆写",
     )?;
-    let content = source::read_source(source_type, source_uri)?;
+    let content = source::read_source(source_type, source_uri).await?;
     source::validate_yaml(&content)?;
+
+    let root = root.to_path_buf();
+    let editing_path = editing_path.to_string();
+    let name = name.to_string();
+    let source_uri = source_uri.to_string();
+    crate::runtime::spawn_blocking(move || {
+        save_entry_with_content(
+            &root,
+            &editing_path,
+            &name,
+            source_type,
+            &source_uri,
+            &content,
+        )
+    })
+    .await
+    .map_err(|error| format!("保存覆写任务失败：{error}"))?
+}
+
+fn save_entry_with_content(
+    root: &std::path::Path,
+    editing_path: &str,
+    name: &str,
+    source_type: crate::app::config::SourceType,
+    source_uri: &str,
+    content: &str,
+) -> Result<(), String> {
+    let overrides = config::overrides();
 
     let existing = if editing_path.is_empty() {
         None
@@ -645,7 +706,7 @@ fn save_entry(
     } else {
         source::unique_internal_path(root, OVERRIDES_DIR, source_uri)?
     };
-    source::write_internal(&internal_path, &content)?;
+    source::write_internal(&internal_path, content)?;
 
     let entry = build_entry(
         existing,
@@ -674,24 +735,39 @@ fn save_entry(
     Ok(())
 }
 
-fn update_entry(root: &std::path::Path, path: &str) -> Result<(), String> {
+async fn update_entry_async(root: &std::path::Path, path: &str) -> Result<(), String> {
     let entry = config::overrides()
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| "未找到要更新的覆写".to_string())?;
-    update_entry_without_core(root, &entry)?;
+    let content = source::read_source(entry.source_type, &entry.source_uri).await?;
+    source::validate_yaml(&content)?;
+    let root = root.to_path_buf();
+    crate::runtime::spawn_blocking(move || update_entry_with_content(&root, &entry, &content))
+        .await
+        .map_err(|error| format!("更新覆写任务失败：{error}"))?
+}
+
+fn update_entry_without_core(
+    root: &std::path::Path,
+    entry: &OverrideEntry,
+    content: &str,
+) -> Result<(), String> {
+    let target = source::safe_internal_path(root, OVERRIDES_DIR, &entry.path)?;
+    source::write_internal(&target, content)
+}
+
+fn update_entry_with_content(
+    root: &std::path::Path,
+    entry: &OverrideEntry,
+    content: &str,
+) -> Result<(), String> {
+    update_entry_without_core(root, entry, content)?;
     if entry.enabled {
         core::on_config_changed(root)
             .map_err(|error| format!("覆写已更新，但核心联动失败：{error}"))?;
     }
     Ok(())
-}
-
-fn update_entry_without_core(root: &std::path::Path, entry: &OverrideEntry) -> Result<(), String> {
-    let content = source::read_source(entry.source_type, &entry.source_uri)?;
-    source::validate_yaml(&content)?;
-    let target = source::safe_internal_path(root, OVERRIDES_DIR, &entry.path)?;
-    source::write_internal(&target, &content)
 }
 
 fn delete_entry(root: &std::path::Path, path: &str) -> Result<(), String> {

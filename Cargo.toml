@@ -1,6 +1,6 @@
 [package]
 name = "clash-ui"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 default-run = "clash-ui"
 
@@ -13,7 +13,7 @@ serde-saphyr = "1"
 serde_json = "1"
 slint = { version = "1", features = ["unstable-winit-030", "system-tray"] }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 http = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

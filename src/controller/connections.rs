@@ -8,9 +8,9 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 use tokio::sync::mpsc;
 
 use crate::clash::api::{self, ConnEntry, ConnectionSnapshot};
+use crate::clash::stream::ConnectionUpdate;
+use crate::constants::MAX_CONNECTION_HISTORY;
 use crate::{ConnectionDetailRow, ConnectionRow, ConnectionsModel, MainWindow};
-
-pub const MAX_CONNECTION_HISTORY: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct ConnectionRecord {
@@ -221,15 +221,18 @@ pub fn clear_runtime(state: &SharedConnectionsState) {
     next_operation_token(&mut state);
 }
 
-pub fn start_recorder(mut receiver: mpsc::Receiver<ConnectionSnapshot>) -> ConnectionsRecorder {
+pub fn start_recorder(mut receiver: mpsc::Receiver<ConnectionUpdate>) -> ConnectionsRecorder {
     let recorder = ConnectionsRecorder {
         state: new_state(),
         notifier: Arc::new(Mutex::new(None)),
     };
     let worker = recorder.clone();
     crate::runtime::spawn_task(async move {
-        while let Some(snapshot) = receiver.recv().await {
-            apply_snapshot(&worker.state, snapshot, Instant::now());
+        while let Some(update) = receiver.recv().await {
+            if update.generation != crate::clash::stream::runtime_generation() {
+                continue;
+            }
+            apply_snapshot(&worker.state, update.snapshot, Instant::now());
             worker.notify();
         }
     });
@@ -612,6 +615,9 @@ fn finish_operation(
     token: u64,
     result: Result<String, String>,
 ) {
+    if let Err(message) = &result {
+        crate::log::error(format_args!("{message}"));
+    }
     invoke_ui(move || {
         let (message, variant) = {
             let mut view = lock_state(&state);
@@ -654,8 +660,9 @@ pub fn close_connection_async(
         sync_ui(&window, &state);
     }
     let worker_state = state.clone();
-    crate::runtime::spawn_blocking(move || {
+    crate::runtime::spawn_task(async move {
         let result = api::close_connection(&identity)
+            .await
             .map(|_| "关闭连接请求已发送".to_string())
             .map_err(|error| format!("关闭连接失败：{error}"));
         finish_operation(weak, worker_state, token, result);
@@ -670,8 +677,9 @@ pub fn close_all_async(weak: Weak<MainWindow>, state: SharedConnectionsState) {
         sync_ui(&window, &state);
     }
     let worker_state = state.clone();
-    crate::runtime::spawn_blocking(move || {
+    crate::runtime::spawn_task(async move {
         let result = api::close_all_connections()
+            .await
             .map(|_| "关闭全部连接请求已发送".to_string())
             .map_err(|error| format!("关闭全部连接失败：{error}"));
         finish_operation(weak, worker_state, token, result);
@@ -834,36 +842,12 @@ pub fn apply_snapshot(state: &SharedConnectionsState, snapshot: ConnectionSnapsh
         .previous_snapshot_at
         .map(|previous| now.saturating_duration_since(previous));
 
-    let current_ids = snapshot
-        .connections
-        .iter()
-        .map(|connection| connection.id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-
-    if state.initialized {
-        let missing = state
-            .active_by_id
-            .iter()
-            .filter(|(id, _)| !current_ids.contains(id.as_str()))
-            .map(|(_, record)| record.clone())
-            .collect::<Vec<_>>();
-        for record in missing {
-            let history_id = state.next_history_id;
-            state.next_history_id = state.next_history_id.wrapping_add(1).max(1);
-            state
-                .closed
-                .push_front(ClosedConnection { history_id, record });
-            while state.closed.len() > MAX_CONNECTION_HISTORY {
-                state.closed.pop_back();
-            }
-        }
-    }
-
-    let previous = &state.active_by_id;
+    let mut previous = std::mem::take(&mut state.active_by_id);
     let mut active_by_id = HashMap::with_capacity(snapshot.connections.len());
     for entry in snapshot.connections {
-        let (upload_rate, download_rate) = previous
-            .get(&entry.id)
+        let previous_record = previous.remove(&entry.id);
+        let (upload_rate, download_rate) = previous_record
+            .as_ref()
             .zip(elapsed)
             .filter(|(_, elapsed)| elapsed.as_secs_f64() > 0.0)
             .map(|(old, elapsed)| {
@@ -882,6 +866,19 @@ pub fn apply_snapshot(state: &SharedConnectionsState, snapshot: ConnectionSnapsh
                 download_rate,
             }),
         );
+    }
+
+    if state.initialized {
+        for (_, record) in previous {
+            let history_id = state.next_history_id;
+            state.next_history_id = state.next_history_id.wrapping_add(1).max(1);
+            state
+                .closed
+                .push_front(ClosedConnection { history_id, record });
+            while state.closed.len() > MAX_CONNECTION_HISTORY {
+                state.closed.pop_back();
+            }
+        }
     }
 
     state.active_by_id = active_by_id;
@@ -956,9 +953,10 @@ mod tests {
         apply_snapshot, clear_history_local, clear_runtime, cycle_sort, detail_fields,
         format_bytes, format_rate, matches_query, new_state, project_rows, remove_history_local,
         sync_rows_model, visible_connections, ConnectionRecord, ConnectionTab, SortColumn,
-        SortDirection, SortState, MAX_CONNECTION_HISTORY,
+        SortDirection, SortState,
     };
     use crate::clash::api::{ConnEntry, ConnMeta, ConnectionSnapshot};
+    use crate::constants::MAX_CONNECTION_HISTORY;
     use crate::ConnectionRow;
     use serde_json::Value;
     use slint::{Model, ModelRc, SharedString, VecModel};

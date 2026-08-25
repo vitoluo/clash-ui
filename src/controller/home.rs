@@ -205,9 +205,9 @@ fn bind_core(window: &MainWindow, root: PathBuf, start: Instant) {
             }
             let weak = weak.clone();
             let task_start = start;
-            crate::runtime::spawn_blocking(move || {
+            crate::runtime::spawn_task(async move {
                 let _guard = guard;
-                let update_error = api::upgrade().err().map(|error| {
+                let update_error = api::upgrade().await.err().map(|error| {
                     crate::log::error(format_args!("更新 clash 核心失败: {error}"));
                     format!("更新核心失败：{error}")
                 });
@@ -232,17 +232,23 @@ fn bind_online_panel(window: &MainWindow, root: PathBuf) {
         .global::<crate::HomeModel>()
         .on_open_online_panel(move || {
             let task_root = root.clone();
-            crate::runtime::spawn_blocking(move || match prepare_online_panel(&task_root) {
-                Ok(url) => {
-                    if let Err(error) = slint::invoke_from_event_loop(move || {
-                        if let Err(error) = platform::open_url(&url) {
-                            crate::log::error(format_args!("打开在线面板失败：{error}"));
+            crate::runtime::spawn_task(async move {
+                match prepare_online_panel(&task_root).await {
+                    Ok(url) => {
+                        let result =
+                            crate::runtime::spawn_blocking(move || platform::open_url(&url)).await;
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                crate::log::error(format_args!("打开在线面板失败：{error}"));
+                            }
+                            Err(error) => {
+                                crate::log::error(format_args!("打开在线面板任务失败：{error}"));
+                            }
                         }
-                    }) {
-                        crate::log::error(format_args!("投递在线面板打开任务失败：{error}"));
                     }
+                    Err(error) => crate::log::error(format_args!("准备在线面板失败：{error}")),
                 }
-                Err(error) => crate::log::error(format_args!("准备在线面板失败：{error}")),
             });
         });
 }
@@ -337,21 +343,34 @@ pub fn refresh_static(weak: slint::Weak<MainWindow>) {
         return;
     }
 
-    crate::runtime::spawn_blocking(move || {
-        let configs = api::get_configs();
-        let version = api::get_version()
-            .map(|version| version.version)
-            .unwrap_or_else(|_| "—".to_string());
+    crate::runtime::spawn_task(async move {
+        let (configs, version_result) = tokio::join!(api::get_configs(), api::get_version());
+        let version = match version_result {
+            Ok(version) => version.version,
+            Err(error) => {
+                crate::log::error(format_args!("加载核心版本失败：{error}"));
+                "—".to_string()
+            }
+        };
+        let endpoint = match &configs {
+            Ok(configs) => match tray::proxy_endpoint_from_configs(configs) {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    crate::log::error(format_args!("解析首页代理地址失败：{error}"));
+                    None
+                }
+            },
+            Err(error) => {
+                crate::log::error(format_args!("加载核心配置失败：{error}"));
+                None
+            }
+        };
         if let Err(error) = slint::invoke_from_event_loop(move || {
             if STATIC_REFRESH_TOKEN.load(Ordering::Acquire) != token {
                 return;
             }
             let Some(window) = weak.upgrade() else { return };
             let home = window.global::<crate::HomeModel>();
-            let endpoint = configs
-                .as_ref()
-                .ok()
-                .and_then(|configs| tray::proxy_endpoint_from_configs(configs).ok());
             home.set_proxy_address(
                 endpoint
                     .as_ref()
@@ -414,6 +433,7 @@ fn panel_directory_state(path: &Path) -> Result<PanelDirectoryState, String> {
 }
 
 /// 编排在线面板准备流程，允许测试注入更新闭包和核心会话快照。
+#[cfg(test)]
 fn prepare_online_panel_with<S, U, E>(
     root: &Path,
     initial_snapshot: Option<core::ControllerSnapshot>,
@@ -439,13 +459,30 @@ where
 }
 
 /// 准备在线面板并返回当前核心会话对应的完整 URL。
-pub fn prepare_online_panel(root: &Path) -> Result<String, String> {
-    prepare_online_panel_with(
-        root,
-        core::get_controller_snapshot(),
-        core::get_controller_snapshot,
-        || api::upgrade_ui().map_err(|error| error.to_string()),
-    )
+pub async fn prepare_online_panel(root: &Path) -> Result<String, String> {
+    let _initial_snapshot =
+        core::get_controller_snapshot().ok_or_else(|| "核心未运行".to_string())?;
+    let panel_dir = root.join(RUNTIME_UI_DIR);
+    let panel_state = crate::runtime::spawn_blocking({
+        let panel_dir = panel_dir.clone();
+        move || panel_directory_state(&panel_dir)
+    })
+    .await
+    .map_err(|error| format!("检查在线面板目录任务失败：{error}"))??;
+    if panel_state == PanelDirectoryState::Empty {
+        api::upgrade_ui()
+            .await
+            .map_err(|error| format!("下载在线面板失败：{error}"))?;
+        let panel_state = crate::runtime::spawn_blocking(move || panel_directory_state(&panel_dir))
+            .await
+            .map_err(|error| format!("检查在线面板目录任务失败：{error}"))??;
+        if panel_state == PanelDirectoryState::Empty {
+            return Err("在线面板下载完成但目录仍为空".to_string());
+        }
+    }
+
+    let snapshot = core::get_controller_snapshot().ok_or_else(|| "核心未运行".to_string())?;
+    Ok(zashboard_url(&snapshot))
 }
 
 #[cfg(test)]

@@ -47,16 +47,22 @@ pub fn source_type_name(source_type: SourceType) -> &'static str {
 }
 
 /// 读取本地文件或 HTTP 来源。
-pub fn read_source(source_type: SourceType, source_uri: &str) -> Result<String, String> {
+pub async fn read_source(source_type: SourceType, source_uri: &str) -> Result<String, String> {
     match source_type {
         SourceType::File => {
-            fs::read_to_string(source_uri).map_err(|error| format!("读取源文件失败：{error}"))
+            let source_uri = source_uri.to_string();
+            crate::runtime::spawn_blocking(move || {
+                fs::read_to_string(source_uri).map_err(|error| format!("读取源文件失败：{error}"))
+            })
+            .await
+            .map_err(|error| format!("读取源文件任务失败：{error}"))?
         }
         SourceType::Http => {
             if !(source_uri.starts_with("http://") || source_uri.starts_with("https://")) {
                 return Err("HTTP 地址必须以 http:// 或 https:// 开头".to_string());
             }
             http::download_text(source_uri, Duration::from_secs(30))
+                .await
                 .map_err(|error| format!("HTTP 下载失败：{error}"))
         }
     }

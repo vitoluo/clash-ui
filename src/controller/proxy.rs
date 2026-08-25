@@ -182,9 +182,12 @@ impl ProxyViewState {
                     group.testing = old_group.testing && !old_group.nodes.is_empty();
                     group.test_token = old_group.test_token;
 
+                    let mut old_nodes = HashMap::with_capacity(old_group.nodes.len());
+                    for old_node in &old_group.nodes {
+                        old_nodes.entry(old_node.name.as_str()).or_insert(old_node);
+                    }
                     for node in &mut group.nodes {
-                        if let Some(old_node) = old_group.nodes.iter().find(|n| n.name == node.name)
-                        {
+                        if let Some(old_node) = old_nodes.get(node.name.as_str()) {
                             if old_node.result_override || old_node.latency_state == LATENCY_TESTING
                             {
                                 node.latency = old_node.latency;
@@ -384,8 +387,11 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedProxyState) {
         token
     };
 
-    crate::runtime::spawn_blocking(move || {
-        let result = api::get_proxies();
+    crate::runtime::spawn_task(async move {
+        let result = api::get_proxies().await;
+        if let Err(error) = &result {
+            crate::log::error(format_args!("加载代理数据失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
@@ -443,8 +449,16 @@ pub fn select_node_async(
         (group_name, node_name, token)
     };
 
-    crate::runtime::spawn_blocking(move || {
-        let result = api::select_proxy(&group_name, &node_name).and_then(|_| api::get_proxies());
+    crate::runtime::spawn_task(async move {
+        let result = match api::select_proxy(&group_name, &node_name).await {
+            Ok(()) => api::get_proxies().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = &result {
+            crate::log::error(format_args!(
+                "选择代理节点失败，组={group_name}，节点={node_name}：{error}"
+            ));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
@@ -496,8 +510,11 @@ pub fn test_group_async(weak: Weak<MainWindow>, state: SharedProxyState, group_i
         (group_name, test_url, token)
     };
 
-    crate::runtime::spawn_blocking(move || {
-        let result = api::get_group_delay(&group_name, &test_url, TEST_TIMEOUT_MS);
+    crate::runtime::spawn_task(async move {
+        let result = api::get_group_delay(&group_name, &test_url, TEST_TIMEOUT_MS).await;
+        if let Err(error) = &result {
+            crate::log::error(format_args!("代理组延迟测试失败，组={group_name}：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
@@ -589,8 +606,13 @@ pub fn test_node_async(
         (group_name, node_name, test_url, token)
     };
 
-    crate::runtime::spawn_blocking(move || {
-        let result = api::get_proxy_delay(&node_name, &test_url, TEST_TIMEOUT_MS);
+    crate::runtime::spawn_task(async move {
+        let result = api::get_proxy_delay(&node_name, &test_url, TEST_TIMEOUT_MS).await;
+        if let Err(error) = &result {
+            crate::log::error(format_args!(
+                "代理节点延迟测试失败，组={group_name}，节点={node_name}：{error}"
+            ));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
@@ -640,7 +662,10 @@ fn format_error(prefix: &str, error: &ApiError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_group_states, clear_runtime, sync_groups_model, sync_vec_model};
+    use super::{
+        build_group_states, clear_runtime, sync_groups_model, sync_vec_model, ProxyGroupState,
+        ProxyNodeState, ProxyViewState, DEFAULT_TEST_URL, LATENCY_SUCCESS,
+    };
     use crate::clash::api::ProxyEntry;
     use crate::{ProxyGroup, ProxyNode};
     use slint::{Model, ModelRc, VecModel};
@@ -829,5 +854,61 @@ mod tests {
         assert_ne!(view.refresh_token, refresh_token);
         assert_ne!(view.selection_token, selection_token);
         assert_eq!(view.refresh_token, view.selection_token);
+    }
+
+    #[test]
+    fn merge_proxies_preserves_first_duplicate_node_state() {
+        let mut state = ProxyViewState::default();
+        state.groups.push(ProxyGroupState {
+            name: "组".to_string(),
+            now: String::new(),
+            test_url: DEFAULT_TEST_URL.to_string(),
+            open: true,
+            testing: false,
+            test_token: 0,
+            nodes: vec![
+                ProxyNodeState {
+                    name: "节点".to_string(),
+                    type_: "旧类型 1".to_string(),
+                    latency: 111,
+                    latency_state: LATENCY_SUCCESS,
+                    operation_token: 1,
+                    result_override: true,
+                },
+                ProxyNodeState {
+                    name: "节点".to_string(),
+                    type_: "旧类型 2".to_string(),
+                    latency: 222,
+                    latency_state: LATENCY_SUCCESS,
+                    operation_token: 2,
+                    result_override: true,
+                },
+            ],
+        });
+        let mut proxies = HashMap::new();
+        proxies.insert(
+            "组".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "name": "组",
+                "type": "Selector",
+                "all": ["节点"]
+            }))
+            .unwrap(),
+        );
+        proxies.insert(
+            "节点".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "name": "节点",
+                "type": "Http"
+            }))
+            .unwrap(),
+        );
+
+        state.merge_proxies(&proxies);
+
+        let node = &state.groups[0].nodes[0];
+        assert_eq!(node.latency, 111);
+        assert_eq!(node.operation_token, 1);
+        assert_eq!(node.type_, "Http");
     }
 }

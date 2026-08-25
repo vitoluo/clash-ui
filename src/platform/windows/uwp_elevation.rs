@@ -24,7 +24,7 @@ fn encode_uwp_argument(value: &str) -> String {
 }
 
 fn decode_uwp_argument(value: &str) -> Result<String, String> {
-    if !value.is_ascii() || value.len() % 2 != 0 {
+    if !value.is_ascii() || !value.len().is_multiple_of(2) {
         return Err("提权 UWP 参数长度无效".to_string());
     }
     let bytes = (0..value.len())

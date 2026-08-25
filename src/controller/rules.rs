@@ -171,8 +171,11 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedRulesState) {
     };
 
     let worker_state = state.clone();
-    crate::runtime::spawn_blocking(move || {
-        let result = api::get_rules().map(sort_rules);
+    crate::runtime::spawn_task(async move {
+        let result = api::get_rules().await.map(sort_rules);
+        if let Err(error) = &result {
+            crate::log::error(format_args!("加载规则数据失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&worker_state);

@@ -66,10 +66,8 @@ fn apply_array_op(target: &mut Value, op: ArrayOp, other: Value) {
             base_array.extend(other_array);
         }
         ArrayOp::Insert(index) => {
-            let position = (index + 1).min(base_array.len());
-            for (offset, value) in other_array.into_iter().enumerate() {
-                base_array.insert(position + offset, value);
-            }
+            let position = index.saturating_add(1).min(base_array.len());
+            base_array.splice(position..position, other_array);
         }
     }
     *target = Value::Array(base_array);
@@ -185,17 +183,26 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
     let yaml = serde_saphyr::to_string(&merged)
         .map_err(|error| CoreError::Serialize(error.to_string()))?;
     let output_dir = root.join(RUNTIME_DIR);
-    fs::create_dir_all(&output_dir)
-        .map_err(|error| CoreError::Io("创建 runtime 目录失败".into(), error))?;
-    fs::write(output_dir.join("config.yaml"), yaml)
-        .map_err(|error| CoreError::Io("写入合并配置失败".into(), error))?;
+    let output_path = output_dir.join("config.yaml");
+    let should_write = match fs::read(&output_path) {
+        Ok(existing) => existing != yaml.as_bytes(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(CoreError::Io("读取现有合并配置失败".into(), error)),
+    };
+    if should_write {
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| CoreError::Io("创建 runtime 目录失败".into(), error))?;
+        fs::write(output_path, yaml)
+            .map_err(|error| CoreError::Io("写入合并配置失败".into(), error))?;
+    }
     Ok(())
 }
 
 // 合并当前全局配置，供核心启动和配置变更流程调用。
-pub fn merge_config(root: &Path) -> Result<(), CoreError> {
+pub fn merge_config(root: &Path) -> Result<AppConfig, CoreError> {
     let cfg = config::get();
-    merge_config_inner(root, &cfg)
+    merge_config_inner(root, &cfg)?;
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -265,6 +272,13 @@ mod tests {
         let mut base = serde_json::json!({});
         deep_merge(&mut base, serde_json::json!({"list::$": ["x"]}));
         assert_eq!(base["list"], serde_json::json!(["x"]));
+
+        let mut base = serde_json::json!({"list": ["a", "b"]});
+        deep_merge(
+            &mut base,
+            serde_json::json!({format!("list::{}", usize::MAX): ["x", "y"]}),
+        );
+        assert_eq!(base["list"], serde_json::json!(["a", "b", "x", "y"]));
     }
 
     #[test]
@@ -389,5 +403,21 @@ mod tests {
         assert!(value.get("port").is_none());
         assert!(value.get("socks-port").is_none());
         assert!(value.get("mixed-port").is_none());
+    }
+
+    #[test]
+    fn identical_runtime_config_keeps_existing_bytes() {
+        let root = tmp_root("same_runtime");
+        fs::create_dir_all(root.join(RUNTIME_DIR)).unwrap();
+        fs::create_dir_all(root.join(ASSETS_DIR)).unwrap();
+        fs::write(root.join(FIXED_YAML_PATH), "external-ui: ui\n").unwrap();
+
+        let cfg = AppConfig::default();
+        merge_config_inner(&root, &cfg).unwrap();
+        let path = root.join(RUNTIME_DIR).join("config.yaml");
+        let first = fs::read(&path).unwrap();
+        merge_config_inner(&root, &cfg).unwrap();
+        let second = fs::read(path).unwrap();
+        assert_eq!(first, second);
     }
 }

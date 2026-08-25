@@ -6,12 +6,10 @@ use std::time::Instant;
 
 use super::{app_context::AppContext, config};
 use crate::constants::{
-    ASSETS_DIR, CLASH_DIR, CONFIGS_DIR, FIXED_YAML, FIXED_YAML_PATH, OVERRIDES_DIR, RUNTIME_DIR,
-    RUNTIME_UI_DIR,
+    ASSETS_DIR, CLASH_DIR, CONFIGS_DIR, FIXED_YAML, FIXED_YAML_PATH, GEO_DATA_FILES, OVERRIDES_DIR,
+    RUNTIME_DIR, RUNTIME_UI_DIR,
 };
 use crate::{log, platform};
-
-const GEO_DATA_FILES: &[&str] = &["geoip.dat", "geosite.dat", "country.mmdb", "asn.mmdb"];
 
 /// 返回可执行文件所在目录（运行时资源根目录）。
 fn exe_dir() -> PathBuf {

@@ -8,6 +8,9 @@ pub(crate) const CONFIGS_DIR: &str = "data/configs";
 pub(crate) const OVERRIDES_DIR: &str = "data/overrides";
 pub(crate) const RUNTIME_DIR: &str = "data/runtime";
 pub(crate) const RUNTIME_UI_DIR: &str = "data/runtime/ui";
+pub(crate) const GEO_DATA_FILES: &[&str] =
+    &["geoip.dat", "geosite.dat", "country.mmdb", "asn.mmdb"];
+pub(crate) const MAX_CONNECTION_HISTORY: usize = 1000;
 
 // 设置页排除网段默认值。
 pub(crate) const DEFAULT_TUN_ROUTE_EXCLUDE_ADDRESS: &[&str] = &[

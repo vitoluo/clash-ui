@@ -77,7 +77,7 @@ impl AppContext {
             connections_state.clone(),
             logs_state.clone(),
         );
-        if let Err(error) = core::on_config_changed(&root) {
+        if let Err(error) = core::start_core(&root) {
             crate::log::error(format_args!("启动 clash 核心失败: {error}"));
         }
         configure_theme(&main_window, &start);
@@ -147,9 +147,11 @@ fn register_core_lifecycle_handlers(
     let weak = window.as_weak();
     core::set_stop_handler(move || {
         if config::get().proxy_status.system {
-            if let Err(error) = tray::clear_system_proxy() {
-                crate::log::error(format_args!("核心停止时清除系统代理失败：{error}"));
-            }
+            crate::runtime::spawn_blocking(|| {
+                if let Err(error) = tray::clear_system_proxy() {
+                    crate::log::error(format_args!("核心停止时清除系统代理失败：{error}"));
+                }
+            });
         }
         proxy::clear_runtime(&proxy_state);
         rules::clear_runtime(&rules_state);

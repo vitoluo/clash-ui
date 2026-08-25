@@ -439,8 +439,11 @@ pub fn toggle_auto_start(weak: Weak<MainWindow>, state: SharedSettingsState, ena
     if let Some(window) = weak.upgrade() {
         window.global::<SettingsModel>().set_operation_busy(true);
     }
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = platform::set_auto_start(enabled);
+        if let Err(error) = &result {
+            crate::log::error(format_args!("开机自启设置失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -564,6 +567,7 @@ pub fn submit_ports(
     })();
     let Ok((mixed, http, socks)) = result else {
         if let Err(error) = result {
+            crate::log::error(format_args!("端口设置校验失败：{error}"));
             if let Some(window) = weak.upgrade() {
                 set_toast(&window, &error, 2);
             }
@@ -737,7 +741,7 @@ pub fn remove_list_item(weak: Weak<MainWindow>, state: SharedSettingsState, inde
 
 fn normalize_list(value: &str) -> Vec<String> {
     let mut values = Vec::new();
-    for item in value.split(|character| matches!(character, ',' | ';' | '\n' | '\r')) {
+    for item in value.split([',', ';', '\n', '\r']) {
         let item = item.trim();
         if !item.is_empty() && !values.iter().any(|current| current == item) {
             values.push(item.to_string());
@@ -863,6 +867,7 @@ pub fn reset_list(weak: Weak<MainWindow>, state: SharedSettingsState, kind: i32)
 pub fn save_list(weak: Weak<MainWindow>, state: SharedSettingsState, kind: i32, value: String) {
     let values = normalize_list(&value);
     if let Err(error) = validate_list(kind, &values) {
+        crate::log::error(format_args!("列表设置校验失败：{error}"));
         if let Some(window) = weak.upgrade() {
             set_toast(&window, &error, 2);
         }
@@ -920,8 +925,11 @@ pub fn save_list(weak: Weak<MainWindow>, state: SharedSettingsState, kind: i32, 
     if let Some(window) = weak.upgrade() {
         window.global::<SettingsModel>().set_operation_busy(true);
     }
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = platform::set_proxy_bypass(&values);
+        if let Err(error) = &result {
+            crate::log::error(format_args!("刷新平台跳过代理失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -968,8 +976,11 @@ fn load_uwp_async(weak: Weak<MainWindow>, state: SharedSettingsState) {
         view.uwp_token = token;
         token
     };
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = platform::list_uwp_apps();
+        if let Err(error) = &result {
+            crate::log::error(format_args!("加载 UWP 列表失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -1068,8 +1079,11 @@ pub fn save_uwp(weak: Weak<MainWindow>, state: SharedSettingsState) {
     if let Some(window) = weak.upgrade() {
         window.global::<SettingsModel>().set_operation_busy(true);
     }
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = platform::set_uwp_loopback_batch(&changes);
+        if let Err(error) = &result {
+            crate::log::error(format_args!("UWP 回环设置失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -1117,8 +1131,11 @@ pub fn apply_core(weak: Weak<MainWindow>, state: SharedSettingsState) {
     if let Some(window) = weak.upgrade() {
         window.global::<SettingsModel>().set_applying_core(true);
     }
-    std::thread::spawn(move || {
+    crate::runtime::spawn_blocking(move || {
         let result = core::on_config_changed(&root).map_err(|error| error.to_string());
+        if let Err(error) = &result {
+            crate::log::error(format_args!("应用配置失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -1158,8 +1175,10 @@ mod tests {
 
     #[test]
     fn renders_port_summaries() {
-        let mut clash = config::ClashSettings::default();
-        clash.mixed_port = Some(7890);
+        let mut clash = config::ClashSettings {
+            mixed_port: Some(7890),
+            ..config::ClashSettings::default()
+        };
         assert_eq!(ports_summary(&clash), "混合端口 7890");
 
         clash.mixed_port = None;

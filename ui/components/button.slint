@@ -30,6 +30,7 @@ export component Button inherits Rectangle {
     in property <string> text;
     in property <bool> disabled: false;
     in property <bool> haspopup: false;
+    in property <bool> passed-offset: true;
     in property <bool> rounded: false;
     in property <bool> is-icon: false;
     in property <string> tips;
@@ -110,7 +111,7 @@ export component Button inherits Rectangle {
 
     surface := Rectangle {
         x: 0;
-        y: (root.pressed-down && !root.haspopup) ? 1px : 0px;
+        y: (root.pressed-down && !root.haspopup && root.passed-offset) ? 1px : 0px;
         width: parent.width;
         height: parent.height;
         border-radius: radius;

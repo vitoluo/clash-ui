@@ -231,6 +231,9 @@ fn finish_operation(
     result: Result<String, String>,
     close_form: bool,
 ) {
+    if let Err(message) = &result {
+        crate::log::error(format_args!("{message}"));
+    }
     invoke_ui(move || {
         let Some(window) = weak.upgrade() else { return };
         let mut view = lock_state(&state);
@@ -324,6 +327,9 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedConfigState) {
             Some(_) => Err("选择的路径不是文件".to_string()),
             None => Ok(None),
         });
+        if let Err(error) = &result {
+            crate::log::error(format_args!("选择配置源文件失败：{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
@@ -404,8 +410,9 @@ pub fn submit_form(
         return;
     };
     let root = lock_state(&state).root.clone();
-    crate::runtime::spawn_blocking(move || {
-        let result = save_entry(&root, &editing_path, &name, &source_type, &source_uri)
+    crate::runtime::spawn_task(async move {
+        let result = save_entry_async(&root, &editing_path, &name, &source_type, &source_uri)
+            .await
             .map(|_| "配置已保存".to_string())
             .map_err(|error| format!("保存配置失败：{error}"));
         finish_operation(weak, state, token, result, true);
@@ -418,8 +425,9 @@ pub fn update(weak: Weak<MainWindow>, state: SharedConfigState, path: String) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    crate::runtime::spawn_blocking(move || {
-        let result = update_entry(&root, &path)
+    crate::runtime::spawn_task(async move {
+        let result = update_entry_async(&root, &path)
+            .await
             .map(|_| "配置已更新".to_string())
             .map_err(|error| format!("更新配置失败：{error}"));
         finish_operation(weak, state, token, result, false);
@@ -449,6 +457,9 @@ pub fn view_runtime(weak: Weak<MainWindow>, state: SharedConfigState) {
     crate::runtime::spawn_blocking(move || {
         let result = fs::read_to_string(root.join(RUNTIME_DIR).join("config.yaml"))
             .map_err(|error| format!("读取运行配置失败：{error}"));
+        if let Err(error) = &result {
+            crate::log::error(format_args!("{error}"));
+        }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
@@ -479,18 +490,43 @@ pub fn update_all(weak: Weak<MainWindow>, state: SharedConfigState) {
         return;
     };
     let root = lock_state(&state).root.clone();
-    crate::runtime::spawn_blocking(move || {
+    crate::runtime::spawn_task(async move {
         let entries = config::configs();
         let mut failures = Vec::new();
         let mut enabled_updated = false;
         for entry in entries {
-            match update_entry_without_core(&root, &entry) {
-                Ok(()) => enabled_updated |= entry.enabled,
-                Err(error) => failures.push(format!("{}：{error}", display_name(&entry))),
+            let display_name = display_name(&entry);
+            let enabled = entry.enabled;
+            let result = match source::read_source(entry.source_type, &entry.source_uri).await {
+                Ok(content) => {
+                    if let Err(error) = source::validate_yaml(&content) {
+                        Err(error)
+                    } else {
+                        let root = root.clone();
+                        let entry_for_write = entry.clone();
+                        match crate::runtime::spawn_blocking(move || {
+                            update_entry_without_core(&root, &entry_for_write, &content)
+                        })
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => Err(format!("更新配置任务失败：{error}")),
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => enabled_updated |= enabled,
+                Err(error) => failures.push(format!("{}：{error}", display_name)),
             }
         }
         if enabled_updated {
-            if let Err(error) = core::on_config_changed(&root) {
+            let result = crate::runtime::spawn_blocking(move || core::on_config_changed(&root))
+                .await
+                .map_err(|error| format!("核心联动任务失败：{error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            if let Err(error) = result {
                 failures.push(format!("核心联动失败：{error}"));
             }
         }
@@ -503,7 +539,7 @@ pub fn update_all(weak: Weak<MainWindow>, state: SharedConfigState) {
     });
 }
 
-fn save_entry(
+async fn save_entry_async(
     root: &Path,
     editing_path: &str,
     name: &str,
@@ -524,8 +560,36 @@ fn save_entry(
         source_uri,
         "配置",
     )?;
-    let content = source::read_source(source_type, source_uri)?;
+    let content = source::read_source(source_type, source_uri).await?;
     source::validate_yaml(&content)?;
+
+    let root = root.to_path_buf();
+    let editing_path = editing_path.to_string();
+    let name = name.to_string();
+    let source_uri = source_uri.to_string();
+    crate::runtime::spawn_blocking(move || {
+        save_entry_with_content(
+            &root,
+            &editing_path,
+            &name,
+            source_type,
+            &source_uri,
+            &content,
+        )
+    })
+    .await
+    .map_err(|error| format!("保存配置任务失败：{error}"))?
+}
+
+fn save_entry_with_content(
+    root: &Path,
+    editing_path: &str,
+    name: &str,
+    source_type: SourceType,
+    source_uri: &str,
+    content: &str,
+) -> Result<(), String> {
+    let configs = config::configs();
 
     let existing = if editing_path.is_empty() {
         None
@@ -542,15 +606,16 @@ fn save_entry(
     } else {
         source::unique_internal_path(root, CONFIGS_DIR, source_uri)?
     };
-    source::write_internal(&internal_path, &content)?;
+    source::write_internal(&internal_path, content)?;
 
+    let was_enabled = existing.map(|entry| entry.enabled).unwrap_or(false);
     let entry = ConfigEntry {
         name: if name.trim().is_empty() {
             source::fallback_name(source_uri)
         } else {
             name.trim().to_string()
         },
-        enabled: existing.map(|entry| entry.enabled).unwrap_or(false),
+        enabled: was_enabled,
         source_type,
         source_uri: source_uri.to_string(),
         path: source::relative_internal_path(root, &internal_path),
@@ -567,31 +632,46 @@ fn save_entry(
         }
     });
 
-    if existing.map(|entry| entry.enabled).unwrap_or(false) {
+    if was_enabled {
         core::on_config_changed(root)
             .map_err(|error| format!("配置已保存，但核心联动失败：{error}"))?;
     }
     Ok(())
 }
 
-fn update_entry(root: &Path, path: &str) -> Result<(), String> {
+async fn update_entry_async(root: &Path, path: &str) -> Result<(), String> {
     let entry = config::configs()
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| "未找到要更新的配置".to_string())?;
-    update_entry_without_core(root, &entry)?;
+    let content = source::read_source(entry.source_type, &entry.source_uri).await?;
+    source::validate_yaml(&content)?;
+    let root = root.to_path_buf();
+    crate::runtime::spawn_blocking(move || update_entry_with_content(&root, &entry, &content))
+        .await
+        .map_err(|error| format!("更新配置任务失败：{error}"))?
+}
+
+fn update_entry_without_core(
+    root: &Path,
+    entry: &ConfigEntry,
+    content: &str,
+) -> Result<(), String> {
+    let target = source::safe_internal_path(root, CONFIGS_DIR, &entry.path)?;
+    source::write_internal(&target, content)
+}
+
+fn update_entry_with_content(
+    root: &Path,
+    entry: &ConfigEntry,
+    content: &str,
+) -> Result<(), String> {
+    update_entry_without_core(root, entry, content)?;
     if entry.enabled {
         core::on_config_changed(root)
             .map_err(|error| format!("配置已更新，但核心联动失败：{error}"))?;
     }
     Ok(())
-}
-
-fn update_entry_without_core(root: &Path, entry: &ConfigEntry) -> Result<(), String> {
-    let content = source::read_source(entry.source_type, &entry.source_uri)?;
-    source::validate_yaml(&content)?;
-    let target = source::safe_internal_path(root, CONFIGS_DIR, &entry.path)?;
-    source::write_internal(&target, &content)
 }
 
 fn delete_entry(root: &Path, path: &str) -> Result<(), String> {

@@ -265,7 +265,7 @@ pub(super) fn load_indirect_string(value: &str) -> Option<String> {
     let result = (|| {
         let address = unsafe {
             // SHLoadIndirectString 的导出名固定为 ASCII 字符串。
-            GetProcAddress(module, b"SHLoadIndirectString\0".as_ptr())
+            GetProcAddress(module, c"SHLoadIndirectString".as_ptr().cast())
         };
         if address.is_null() {
             return None;
