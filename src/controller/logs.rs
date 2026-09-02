@@ -3,10 +3,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
-use tokio::sync::broadcast;
+use tokio::sync::{mpsc, watch};
 
 use crate::clash::api::LogLine;
-use crate::constants::MAX_LOG_RECORDS;
+use crate::clash::stream::LogUpdate;
+use crate::consts::MAX_LOG_RECORDS;
+use crate::event::CoreState;
 use crate::{LogRow, LogsModel, MainWindow};
 
 pub type SharedLogsState = Arc<Mutex<LogsViewState>>;
@@ -119,7 +121,6 @@ pub struct LogRecord {
     pub time: String,
     pub level: LogLevel,
     pub message: String,
-    message_lowercase: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,37 +191,97 @@ pub fn read_state(state: &SharedLogsState) -> LogsViewState {
     lock_state(state).clone()
 }
 
-pub fn start_recorder(mut receiver: broadcast::Receiver<LogLine>) -> LogsRecorder {
+fn sync_core_state(
+    current: &mut CoreState,
+    receiver: &mut watch::Receiver<CoreState>,
+    state: &SharedLogsState,
+) -> bool {
+    let next = *receiver.borrow_and_update();
+    if *current == next {
+        return false;
+    }
+    *current = next;
+    clear_runtime(state);
+    true
+}
+
+fn accepts_update(state: CoreState, update: &LogUpdate) -> bool {
+    state.running && state.generation == update.core_generation
+}
+
+pub fn start_recorder(
+    mut receiver: mpsc::Receiver<LogUpdate>,
+    mut core_state: watch::Receiver<CoreState>,
+) -> LogsRecorder {
     let recorder = LogsRecorder {
         state: new_state(),
         notifier: Arc::new(Mutex::new(None)),
     };
     let worker = recorder.clone();
     crate::runtime::spawn_task(async move {
+        let mut current_core_state = *core_state.borrow_and_update();
         loop {
-            let first = match receiver.recv().await {
-                Ok(line) => line,
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    crate::log::error(format_args!("日志记录器跳过 {skipped} 条过期消息"));
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-            let mut accepted = lock_state(&worker.state).append_line(first);
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
-            loop {
-                match tokio::time::timeout_at(deadline, receiver.recv()).await {
-                    Ok(Ok(line)) => accepted |= lock_state(&worker.state).append_line(line),
-                    Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
-                        crate::log::error(format_args!("日志记录器跳过 {skipped} 条过期消息"));
-                    }
-                    Ok(Err(broadcast::error::RecvError::Closed)) => {
-                        if accepted {
+            let first = 'receive: loop {
+                tokio::select! {
+                    biased;
+                    result = core_state.changed() => {
+                        if result.is_err() {
+                            return;
+                        }
+                        if sync_core_state(&mut current_core_state, &mut core_state, &worker.state) {
                             worker.notify();
                         }
-                        return;
+                        continue 'receive;
                     }
-                    Err(_) => break,
+                    result = receiver.recv() => {
+                        match result {
+                            Some(update) => break update,
+                            None => return,
+                        }
+                    }
+                }
+            };
+            let mut accepted =
+                sync_core_state(&mut current_core_state, &mut core_state, &worker.state);
+            if accepts_update(current_core_state, &first) {
+                accepted |= lock_state(&worker.state).append_line(first.line);
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = core_state.changed() => {
+                        if result.is_err() {
+                            if accepted {
+                                worker.notify();
+                            }
+                            return;
+                        }
+                        if sync_core_state(&mut current_core_state, &mut core_state, &worker.state) {
+                            accepted = true;
+                        }
+                    }
+                    result = tokio::time::timeout_at(deadline, receiver.recv()) => {
+                        match result {
+                            Ok(Some(update)) => {
+                                accepted |= sync_core_state(
+                                    &mut current_core_state,
+                                    &mut core_state,
+                                    &worker.state,
+                                );
+                                if accepts_update(current_core_state, &update) {
+                                    accepted |= lock_state(&worker.state).append_line(update.line);
+                                }
+                            }
+                            Ok(None) => {
+                                if accepted {
+                                    worker.notify();
+                                }
+                                return;
+                            }
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
             if accepted {
@@ -453,7 +514,7 @@ impl Default for LogsViewState {
         Self {
             records: VecDeque::new(),
             selected_tab: LogTab::All,
-            all_level: LogLevel::Debug,
+            all_level: LogLevel::Info,
             query: String::new(),
             query_lowercase: String::new(),
             auto_scroll: true,
@@ -481,7 +542,6 @@ impl LogsViewState {
             sequence: self.next_sequence,
             time: line.time,
             level,
-            message_lowercase: message.to_lowercase(),
             message,
         };
         self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
@@ -545,7 +605,7 @@ impl LogsViewState {
     }
 
     fn matches_query(record: &LogRecord, query: &str) -> bool {
-        query.is_empty() || record.message_lowercase.contains(query)
+        query.is_empty() || record.message.to_lowercase().contains(query)
     }
 
     fn matches_record(&self, record: &LogRecord) -> bool {
@@ -567,11 +627,13 @@ mod tests {
         LogLevel, LogTab, LogsViewState, MAX_LOG_RECORDS,
     };
     use crate::clash::api::LogLine;
+    use crate::clash::stream::LogUpdate;
+    use crate::event::CoreState;
     use slint::{Model, ModelRc, VecModel};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     fn line(sequence: u64, level: &str, message: &str) -> LogLine {
         LogLine {
@@ -579,6 +641,23 @@ mod tests {
             level: level.to_string(),
             message: message.to_string(),
         }
+    }
+
+    fn update(sequence: u64, level: &str, message: &str) -> LogUpdate {
+        LogUpdate {
+            core_generation: 0,
+            line: line(sequence, level, message),
+        }
+    }
+
+    fn running_core_state() -> (
+        tokio::sync::watch::Sender<CoreState>,
+        tokio::sync::watch::Receiver<CoreState>,
+    ) {
+        tokio::sync::watch::channel(CoreState {
+            running: true,
+            generation: 0,
+        })
     }
 
     fn sample_state() -> LogsViewState {
@@ -591,11 +670,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_all_debug_and_all_levels() {
+    fn defaults_to_all_info_and_all_levels() {
         let state = sample_state();
         assert_eq!(state.selected_tab, LogTab::All);
-        assert_eq!(state.all_level, LogLevel::Debug);
-        assert_eq!(state.visible_records().len(), 4);
+        assert_eq!(state.all_level, LogLevel::Info);
+        assert_eq!(state.visible_records().len(), 3);
     }
 
     #[test]
@@ -635,6 +714,21 @@ mod tests {
         assert_eq!(state.visible_records()[0].level, LogLevel::Info);
         state.set_query("08:00".to_string());
         assert!(state.visible_records().is_empty());
+    }
+
+    #[test]
+    fn search_matches_ascii_and_unicode_case_insensitively() {
+        let mut state = LogsViewState::default();
+        assert!(state.append_line(line(1, "info", "Connection 中文")));
+        assert!(state.append_line(line(2, "info", "ПРИВЕТ 中文")));
+
+        state.set_query("connection 中文".to_string());
+        assert_eq!(state.visible_records().len(), 1);
+        assert_eq!(state.visible_records()[0].sequence, 1);
+
+        state.set_query("привет 中文".to_string());
+        assert_eq!(state.visible_records().len(), 1);
+        assert_eq!(state.visible_records()[0].sequence, 2);
     }
 
     #[test]
@@ -697,7 +791,8 @@ mod tests {
 
     #[test]
     fn projection_exports_only_time_level_and_full_message() {
-        let state = sample_state();
+        let mut state = sample_state();
+        state.set_all_level(LogLevel::Debug);
         let rows = project_rows(&state);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].time.to_string(), "08:00:01");
@@ -709,6 +804,7 @@ mod tests {
     #[test]
     fn incremental_projection_reuses_model_and_rebuilds_only_after_filter_change() {
         let mut state = LogsViewState::default();
+        state.set_all_level(LogLevel::Debug);
         let rows = Rc::new(VecModel::default());
         let identity = ModelRc::from(rows.clone());
         assert!(state.append_line(line(1, "info", "first")));
@@ -729,29 +825,34 @@ mod tests {
 
     #[test]
     fn recorder_batches_burst_notifications() {
-        let (sender, receiver) = broadcast::channel(32);
-        let recorder = start_recorder(receiver);
+        let (sender, receiver) = mpsc::channel(32);
+        let (_core_sender, core_state) = running_core_state();
+        let recorder = start_recorder(receiver, core_state);
         let notifications = Arc::new(AtomicUsize::new(0));
         let count = notifications.clone();
         recorder.set_notifier(Arc::new(move || {
             count.fetch_add(1, Ordering::AcqRel);
         }));
         for sequence in 1..=20 {
-            sender.send(line(sequence, "debug", "burst")).unwrap();
+            crate::runtime::block(sender.send(update(sequence, "debug", "burst"))).unwrap();
         }
         thread::sleep(Duration::from_millis(150));
         assert_eq!(notifications.load(Ordering::Acquire), 1);
     }
 
     #[test]
-    fn recorder_initializes_before_receive_and_consumes_after_lag() {
-        let (sender, receiver) = broadcast::channel(1);
-        let recorder = start_recorder(receiver);
+    fn recorder_initializes_before_receive_and_consumes_bounded_queue() {
+        let (sender, receiver) = mpsc::channel(1);
+        let (_core_sender, core_state) = running_core_state();
+        let recorder = start_recorder(receiver, core_state);
         let state = recorder.state();
         for sequence in 1..=20 {
-            sender
-                .send(line(sequence, "debug", &format!("message-{sequence}")))
-                .unwrap();
+            crate::runtime::block(sender.send(update(
+                sequence,
+                "debug",
+                &format!("message-{sequence}"),
+            )))
+            .unwrap();
         }
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -771,6 +872,85 @@ mod tests {
             "message-20"
         );
         drop(sender);
+    }
+
+    #[test]
+    fn recorder_discards_queued_logs_after_core_generation_changes() {
+        let (sender, receiver) = mpsc::channel(8);
+        let (core_sender, core_state) = tokio::sync::watch::channel(CoreState {
+            running: true,
+            generation: 1,
+        });
+        let recorder = start_recorder(receiver, core_state);
+        let state = recorder.state();
+
+        crate::runtime::block(sender.send(LogUpdate {
+            core_generation: 1,
+            line: line(1, "info", "旧核心日志"),
+        }))
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if read_state(&state)
+                .records()
+                .back()
+                .is_some_and(|record| record.message == "旧核心日志")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(read_state(&state).records().len(), 1);
+
+        core_sender.send_replace(CoreState {
+            running: false,
+            generation: 2,
+        });
+        crate::runtime::block(sender.send(LogUpdate {
+            core_generation: 1,
+            line: line(2, "info", "停止后残留日志"),
+        }))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if read_state(&state).records().is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(read_state(&state).records().is_empty());
+
+        core_sender.send_replace(CoreState {
+            running: true,
+            generation: 3,
+        });
+        crate::runtime::block(sender.send(LogUpdate {
+            core_generation: 1,
+            line: line(3, "info", "仍然是旧核心日志"),
+        }))
+        .unwrap();
+        crate::runtime::block(sender.send(LogUpdate {
+            core_generation: 3,
+            line: line(3, "info", "新核心日志"),
+        }))
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if read_state(&state)
+                .records()
+                .back()
+                .is_some_and(|record| record.message == "新核心日志")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let records = read_state(&state).records().clone();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "新核心日志");
     }
 
     #[test]

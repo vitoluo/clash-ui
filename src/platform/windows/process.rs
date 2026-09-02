@@ -15,10 +15,13 @@ pub struct CoreProcessGuard {
 }
 
 impl CoreProcessGuard {
-    pub fn attach(child: &Child) -> Result<Self, String> {
+    pub fn attach(child: &Child) -> Result<Self, crate::platform::PlatformError> {
         let raw_job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         if raw_job.is_null() {
-            return Err(last_error("创建核心作业对象"));
+            return Err(crate::platform::PlatformError::operation(
+                "创建核心作业对象",
+                last_error("创建核心作业对象"),
+            ));
         }
         let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
 
@@ -33,22 +36,31 @@ impl CoreProcessGuard {
             )
         };
         if configured == 0 {
-            return Err(last_error("配置核心作业对象"));
+            return Err(crate::platform::PlatformError::operation(
+                "配置核心作业对象",
+                last_error("配置核心作业对象"),
+            ));
         }
 
         let assigned =
             unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) };
         if assigned == 0 {
-            return Err(last_error("关联核心进程到作业对象"));
+            return Err(crate::platform::PlatformError::operation(
+                "关联核心进程到作业对象",
+                last_error("关联核心进程到作业对象"),
+            ));
         }
 
         Ok(Self { job })
     }
 
-    pub fn terminate(&self) -> Result<(), String> {
+    pub fn terminate(&self) -> Result<(), crate::platform::PlatformError> {
         let terminated = unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
         if terminated == 0 {
-            return Err(last_error("终止核心进程树"));
+            return Err(crate::platform::PlatformError::operation(
+                "终止核心进程树",
+                last_error("终止核心进程树"),
+            ));
         }
         Ok(())
     }

@@ -284,6 +284,7 @@ pub use model::*;
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum ApiError {
+    Core(super::core::CoreError),
     Http(http_client::Error),
     Ws(websocket::Error),
     Json(serde_json::Error),
@@ -294,6 +295,7 @@ pub enum ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ApiError::Core(error) => write!(f, "核心会话错误: {error}"),
             ApiError::Http(error) => write!(f, "{error}"),
             ApiError::Ws(error) => write!(f, "WebSocket 错误: {error}"),
             ApiError::Json(error) => write!(f, "JSON 解析失败: {error}"),
@@ -325,7 +327,9 @@ impl Controller {
 }
 
 fn controller() -> Result<Controller, ApiError> {
-    let snapshot = super::core::get_controller_snapshot().ok_or(ApiError::NoSession)?;
+    let snapshot = super::core::get_controller_snapshot()
+        .map_err(ApiError::Core)?
+        .ok_or(ApiError::NoSession)?;
     Ok(Controller {
         http_base_url: format!("http://127.0.0.1:{}", snapshot.port),
         ws_base_url: format!("ws://127.0.0.1:{}", snapshot.port),

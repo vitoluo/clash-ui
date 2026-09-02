@@ -1,12 +1,13 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app::config;
-use crate::constants::{CLASH_DIR, RUNTIME_DIR};
+use crate::consts::{CLASH_DIR, RUNTIME_DIR};
 
 use super::config_merge;
 
@@ -20,10 +21,13 @@ pub enum CoreError {
     Parse(String, Box<serde_saphyr::Error>),
     Serialize(String),
     Json(serde_json::Error),
+    Platform(String),
     CoreMissing,
     Spawn(std::io::Error),
     ProcessGuard(String),
+    Stream(String),
     ReadyTimeout(String),
+    Cleanup(String),
     Lock,
 }
 
@@ -34,12 +38,15 @@ impl std::fmt::Display for CoreError {
             Self::Parse(context, error) => write!(formatter, "{context}: {error}"),
             Self::Serialize(error) => write!(formatter, "序列化合并配置失败: {error}"),
             Self::Json(error) => write!(formatter, "clash 设置转 JSON 失败: {error}"),
+            Self::Platform(error) => write!(formatter, "平台操作失败：{error}"),
             Self::CoreMissing => write!(formatter, "未找到 clash 核心可执行文件"),
             Self::Spawn(error) => write!(formatter, "启动核心失败: {error}"),
             Self::ProcessGuard(error) => write!(formatter, "监管核心进程失败：{error}"),
+            Self::Stream(error) => write!(formatter, "启动核心数据流失败：{error}"),
             Self::ReadyTimeout(error) => {
                 write!(formatter, "等待 clash 核心就绪超时：{error}")
             }
+            Self::Cleanup(error) => write!(formatter, "清理核心运行资源失败：{error}"),
             Self::Lock => write!(formatter, "会话锁被污染"),
         }
     }
@@ -67,82 +74,60 @@ pub struct ControllerSnapshot {
 
 // 全局核心会话，应用进程中最多运行一个核心实例。
 static SESSION: Mutex<Option<CoreSession>> = Mutex::new(None);
-static STOP_HANDLER: RwLock<Option<Arc<dyn Fn() + Send + Sync>>> = RwLock::new(None);
-static READY_HANDLER: RwLock<Option<Arc<dyn Fn() + Send + Sync>>> = RwLock::new(None);
+static CORE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// 注册核心就绪处理器，在 version 接口检查成功后调用。
-pub fn set_ready_handler(handler: impl Fn() + Send + Sync + 'static) {
-    if let Ok(mut current) = READY_HANDLER.write() {
-        *current = Some(Arc::new(handler));
-    }
+/// 读取当前核心会话代次。
+pub fn generation() -> u64 {
+    CORE_GENERATION.load(Ordering::SeqCst)
 }
 
-/// 注册核心停止处理器，由应用上下文负责清理运行时页面数据。
-pub fn set_stop_handler(handler: impl Fn() + Send + Sync + 'static) {
-    if let Ok(mut current) = STOP_HANDLER.write() {
-        *current = Some(Arc::new(handler));
-    }
-}
-
-fn notify_stop_handler() {
-    let handler = STOP_HANDLER
-        .read()
-        .ok()
-        .and_then(|current| current.as_ref().cloned());
-    if let Some(handler) = handler {
-        handler();
-    }
-}
-
-fn notify_ready_handler() {
-    let handler = READY_HANDLER
-        .read()
-        .ok()
-        .and_then(|current| current.as_ref().cloned());
-    if let Some(handler) = handler {
-        handler();
-    }
+fn advance_generation() -> u64 {
+    CORE_GENERATION
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1)
 }
 
 // 读取当前核心控制端点。
-pub fn get_controller_snapshot() -> Option<ControllerSnapshot> {
-    SESSION.lock().ok().and_then(|guard| {
-        guard.as_ref().map(|session| ControllerSnapshot {
+pub fn get_controller_snapshot() -> Result<Option<ControllerSnapshot>, CoreError> {
+    Ok(SESSION
+        .lock()
+        .map_err(|_| CoreError::Lock)?
+        .as_ref()
+        .map(|session| ControllerSnapshot {
             port: session.port,
             secret: session.secret.clone(),
-        })
-    })
+        }))
 }
 
 /// 判断当前核心是否已通过 version 接口就绪检查。
-pub(crate) fn is_ready() -> bool {
-    SESSION
+pub(crate) fn is_ready() -> Result<bool, CoreError> {
+    Ok(SESSION
         .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|session| session.ready))
-        .unwrap_or(false)
+        .map_err(|_| CoreError::Lock)?
+        .as_ref()
+        .is_some_and(|session| session.ready))
 }
 
 // 读取当前核心端口。
 #[allow(dead_code)]
-pub fn get_port() -> Option<u16> {
-    SESSION.lock().ok().and_then(|guard| {
-        guard
-            .as_ref()
-            .filter(|session| session.ready)
-            .map(|session| session.port)
-    })
+pub fn get_port() -> Result<Option<u16>, CoreError> {
+    Ok(SESSION
+        .lock()
+        .map_err(|_| CoreError::Lock)?
+        .as_ref()
+        .filter(|session| session.ready)
+        .map(|session| session.port))
 }
 
 // 读取当前核心密钥。
 #[allow(dead_code)]
-pub fn get_secret() -> Option<String> {
-    SESSION.lock().ok().and_then(|guard| {
-        guard
-            .as_ref()
-            .filter(|session| session.ready)
-            .map(|session| session.secret.clone())
-    })
+pub fn get_secret() -> Result<Option<String>, CoreError> {
+    Ok(SESSION
+        .lock()
+        .map_err(|_| CoreError::Lock)?
+        .as_ref()
+        .filter(|session| session.ready)
+        .map(|session| session.secret.clone()))
 }
 
 fn wait_for_core_ready_with<P>(
@@ -184,18 +169,32 @@ fn wait_for_core_ready() -> Result<(), CoreError> {
 }
 
 // 查找 resources/clash 下的平台核心文件。
-pub fn find_core(root: &Path) -> Option<PathBuf> {
+pub fn find_core(root: &Path) -> Result<Option<PathBuf>, CoreError> {
     let file_name = format!("clash{}", std::env::consts::EXE_SUFFIX);
     let path = root.join(CLASH_DIR).join(&file_name);
-    if path.exists() {
-        return Some(path);
+    if path
+        .try_exists()
+        .map_err(|error| CoreError::Io("检查核心文件失败".into(), error))?
+    {
+        return Ok(Some(path));
     }
 
     let executable_root = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))?;
+        .map_err(|error| CoreError::Io("获取当前程序路径失败".into(), error))?;
+    let executable_root = executable_root
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            CoreError::Io(
+                "获取当前程序目录失败".into(),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "可执行文件没有父目录"),
+            )
+        })?;
     let path = executable_root.join(CLASH_DIR).join(file_name);
-    path.exists().then_some(path)
+    Ok(path
+        .try_exists()
+        .map_err(|error| CoreError::Io("检查随程序分发的核心文件失败".into(), error))?
+        .then_some(path))
 }
 
 // 生成 16 位字母数字密钥。
@@ -209,30 +208,49 @@ pub fn generate_secret() -> String {
 }
 
 // 生成动态控制端口。
-pub fn generate_port() -> u16 {
+pub fn generate_port() -> Result<u16, CoreError> {
     find_free_port()
 }
 
 // 在指定范围内查找未占用端口，失败时交由系统分配。
-fn find_free_port() -> u16 {
-    let used = crate::platform::listening_ports();
+fn find_free_port() -> Result<u16, CoreError> {
+    let used = crate::platform::listening_ports()
+        .map_err(|error| CoreError::Platform(error.to_string()))?;
     for port in 20000..=22000 {
         if used.contains(&port) {
             continue;
         }
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(_) => return Ok(port),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(CoreError::Io(format!("探测端口 {port} 失败"), error)),
         }
     }
 
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("系统端口分配失败");
-    listener.local_addr().unwrap().port()
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| CoreError::Io("系统分配核心端口失败".into(), error))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| CoreError::Io("读取系统分配端口失败".into(), error))?
+        .port();
+    Ok(port)
 }
 
 // 启动核心：先生成运行时配置，无启用配置时不启动进程。
 pub fn start_core(root: &Path) -> Result<(), CoreError> {
-    let cfg = config_merge::merge_config(root)?;
+    let cfg = match config_merge::merge_config(root) {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            crate::event::publish_core_state(false, generation());
+            return Err(error);
+        }
+    };
     start_core_merged(root, &cfg)
+}
+
+fn fail_start(error: CoreError) -> Result<(), CoreError> {
+    crate::event::publish_core_state(false, generation());
+    Err(error)
 }
 
 // 使用已合并的配置快照启动核心；调用方必须先完成配置合并。
@@ -240,9 +258,17 @@ fn start_core_merged(root: &Path, cfg: &config::AppConfig) -> Result<(), CoreErr
     if !cfg.configs.iter().any(|entry| entry.enabled) {
         return Ok(());
     }
+    advance_generation();
 
-    let core = find_core(root).ok_or(CoreError::CoreMissing)?;
-    let port = generate_port();
+    let core = match find_core(root) {
+        Ok(Some(core)) => core,
+        Ok(None) => return fail_start(CoreError::CoreMissing),
+        Err(error) => return fail_start(error),
+    };
+    let port = match generate_port() {
+        Ok(port) => port,
+        Err(error) => return fail_start(error),
+    };
     let secret = generate_secret();
     let runtime = root.join(RUNTIME_DIR);
     let mut command = std::process::Command::new(&core);
@@ -263,14 +289,25 @@ fn start_core_merged(root: &Path, cfg: &config::AppConfig) -> Result<(), CoreErr
         command.creation_flags(0x0800_0000);
     }
 
-    let mut session = SESSION.lock().map_err(|_| CoreError::Lock)?;
-    let mut child = command.spawn().map_err(CoreError::Spawn)?;
+    let mut session = match SESSION.lock() {
+        Ok(session) => session,
+        Err(_) => return fail_start(CoreError::Lock),
+    };
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return fail_start(CoreError::Spawn(error)),
+    };
     let process_guard = match crate::platform::CoreProcessGuard::attach(&child) {
         Ok(guard) => guard,
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(CoreError::ProcessGuard(error));
+            let cleanup = terminate_child_process(&mut child);
+            let start_error = match cleanup {
+                Ok(()) => CoreError::ProcessGuard(error.to_string()),
+                Err(cleanup_error) => CoreError::Cleanup(format!(
+                    "监管核心进程失败：{error}；同时回收进程失败：{cleanup_error}"
+                )),
+            };
+            return fail_start(start_error);
         }
     };
     *session = Some(CoreSession {
@@ -283,48 +320,149 @@ fn start_core_merged(root: &Path, cfg: &config::AppConfig) -> Result<(), CoreErr
     drop(session);
 
     if let Err(error) = wait_for_core_ready() {
-        stop_core();
-        return Err(error);
+        return match stop_core() {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(CoreError::Cleanup(format!(
+                "核心就绪检查失败：{error}；同时清理核心失败：{cleanup_error}"
+            ))),
+        };
     }
-    let mut session = SESSION.lock().map_err(|_| CoreError::Lock)?;
-    let current = session.as_mut().ok_or(CoreError::Lock)?;
+    let mut session = match SESSION.lock() {
+        Ok(session) => session,
+        Err(_) => {
+            let cleanup = stop_core();
+            return match cleanup {
+                Ok(()) => Err(CoreError::Lock),
+                Err(cleanup_error) => Err(CoreError::Cleanup(format!(
+                    "核心会话锁被污染；同时清理核心失败：{cleanup_error}"
+                ))),
+            };
+        }
+    };
+    let current = match session.as_mut() {
+        Some(current) => current,
+        None => {
+            drop(session);
+            let cleanup = stop_core();
+            return match cleanup {
+                Ok(()) => Err(CoreError::Lock),
+                Err(cleanup_error) => Err(CoreError::Cleanup(format!(
+                    "核心会话不存在；同时清理核心失败：{cleanup_error}"
+                ))),
+            };
+        }
+    };
     current.ready = true;
     drop(session);
-    crate::clash::stream::start();
-    notify_ready_handler();
+    if let Err(error) = crate::clash::stream::start() {
+        return match stop_core() {
+            Ok(()) => Err(CoreError::Stream(error.to_string())),
+            Err(cleanup_error) => Err(CoreError::Cleanup(format!(
+                "启动核心数据流失败：{error}；同时清理核心失败：{cleanup_error}"
+            ))),
+        };
+    }
+    crate::event::publish_core_state(true, generation());
     Ok(())
 }
 
 // 停止核心并清理会话。
-pub fn stop_core() {
-    crate::clash::stream::reset();
-    let current = SESSION.lock().ok().and_then(|mut session| session.take());
-    if let Some(mut current) = current {
-        terminate_core_process(&current.process_guard, &mut current.child);
+pub fn stop_core() -> Result<(), CoreError> {
+    let generation = advance_generation();
+    let mut errors = Vec::new();
+    if let Err(error) = crate::clash::stream::reset() {
+        errors.push(error.to_string());
     }
-    notify_stop_handler();
+    let current = match SESSION.lock() {
+        Ok(mut session) => session.take(),
+        Err(_) => {
+            errors.push(CoreError::Lock.to_string());
+            None
+        }
+    };
+    if let Some(mut current) = current {
+        if let Err(error) = terminate_core_process(&current.process_guard, &mut current.child) {
+            errors.push(error.to_string());
+        }
+    }
+    crate::event::publish_core_state(false, generation);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::Cleanup(errors.join("；")))
+    }
 }
 
-fn terminate_core_process(guard: &crate::platform::CoreProcessGuard, child: &mut Child) {
-    if let Err(error) = guard.terminate() {
-        crate::log::error(format_args!("终止 clash 核心进程树失败：{error}"));
+fn terminate_core_process(
+    guard: &crate::platform::CoreProcessGuard,
+    child: &mut Child,
+) -> Result<(), CoreError> {
+    let mut errors = Vec::new();
+    let exited = match child.try_wait() {
+        Ok(status) => status.is_some(),
+        Err(error) => {
+            errors.push(CoreError::Io("读取核心进程状态失败".into(), error).to_string());
+            false
+        }
+    };
+    if !exited {
+        if let Err(error) = guard.terminate() {
+            errors.push(error.to_string());
+        }
+        if let Err(error) = child.kill() {
+            if !matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+            ) {
+                errors.push(format!("终止核心进程失败：{error}"));
+            }
+        }
+        if let Err(error) = child.wait() {
+            errors.push(format!("回收核心进程失败：{error}"));
+        }
     }
-    let _ = child.kill();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::Cleanup(errors.join("；")))
+    }
+}
+
+fn terminate_child_process(child: &mut Child) -> Result<(), CoreError> {
+    let mut errors = Vec::new();
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(error) => errors.push(format!("读取核心进程状态失败：{error}")),
+    }
+    if let Err(error) = child.kill() {
+        if !matches!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+        ) {
+            errors.push(format!("终止核心进程失败：{error}"));
+        }
+    }
     if let Err(error) = child.wait() {
-        crate::log::error(format_args!("回收 clash 核心进程失败：{error}"));
+        errors.push(format!("回收核心进程失败：{error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::Cleanup(errors.join("；")))
     }
 }
 
 // 重启核心。
 pub fn restart_core(root: &Path) -> Result<(), CoreError> {
-    stop_core();
+    stop_core()?;
     let cfg = config_merge::merge_config(root)?;
     start_core_merged(root, &cfg)
 }
 
 // 使用已合并的配置快照重启核心；不重复读取或合并配置。
 fn restart_core_merged(root: &Path, cfg: &config::AppConfig) -> Result<(), CoreError> {
-    stop_core();
+    stop_core()?;
     start_core_merged(root, cfg)
 }
 
@@ -340,7 +478,7 @@ pub fn on_config_changed(root: &Path) -> Result<(), CoreError> {
             start_core_merged(root, &cfg)?;
         }
     } else {
-        stop_core();
+        stop_core()?;
     }
     Ok(())
 }
@@ -348,11 +486,10 @@ pub fn on_config_changed(root: &Path) -> Result<(), CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{ASSETS_DIR, CLASH_DIR, FIXED_YAML_PATH, RUNTIME_DIR};
+    use crate::consts::{ASSETS_DIR, CLASH_DIR, FIXED_YAML_PATH, RUNTIME_DIR};
     use std::cell::Cell;
     use std::fs;
     use std::process::Command;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn spawn_long_running_child() -> Child {
         #[cfg(windows)]
@@ -417,34 +554,8 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_handlers_receive_ready_and_stop_events() {
-        let ready_calls = Arc::new(AtomicUsize::new(0));
-        let stop_calls = Arc::new(AtomicUsize::new(0));
-        set_ready_handler({
-            let ready_calls = ready_calls.clone();
-            move || {
-                ready_calls.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-        set_stop_handler({
-            let stop_calls = stop_calls.clone();
-            move || {
-                stop_calls.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        notify_ready_handler();
-        notify_stop_handler();
-
-        assert_eq!(ready_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(stop_calls.load(Ordering::Relaxed), 1);
-        set_ready_handler(|| {});
-        set_stop_handler(|| {});
-    }
-
-    #[test]
     fn free_port_is_in_range_and_bindable() {
-        let port = find_free_port();
+        let port = find_free_port().expect("应当找到可用端口");
         assert!((20000..=22000).contains(&port), "端口 {port} 超出范围");
         let _listener = TcpListener::bind(("127.0.0.1", port)).expect("端口应当可绑定");
     }
@@ -453,7 +564,7 @@ mod tests {
     fn missing_core_returns_none() {
         let root = tmp_root("findcore");
         fs::create_dir_all(root.join(CLASH_DIR)).unwrap();
-        assert!(find_core(&root).is_none());
+        assert!(find_core(&root).unwrap().is_none());
     }
 
     #[test]
@@ -474,7 +585,7 @@ mod tests {
         let guard =
             crate::platform::CoreProcessGuard::attach(&child).expect("创建测试进程守卫失败");
 
-        terminate_core_process(&guard, &mut child);
+        terminate_core_process(&guard, &mut child).expect("终止测试进程失败");
 
         assert!(child.try_wait().unwrap().is_some());
     }
@@ -487,7 +598,7 @@ mod tests {
         child.kill().expect("终止测试进程失败");
         child.wait().expect("首次回收测试进程失败");
 
-        terminate_core_process(&guard, &mut child);
+        terminate_core_process(&guard, &mut child).expect("终止测试进程失败");
 
         assert!(child.try_wait().unwrap().is_some());
     }

@@ -10,7 +10,10 @@
 //       （与 plan.md 中「Canvas 不可用时退路为 Path」一致，且响应式更稳）。
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
+use crate::clash::stream::TrafficUpdate;
+use crate::event::CoreState;
 use crate::MainWindow;
 use crate::SpeedModel;
 
@@ -37,62 +40,136 @@ pub fn start(window: &MainWindow) {
     speed_model.set_up_line_cmd(up_line.into());
 
     // 核心尚未启动也可能已能订阅（broadcast 发送端常驻），返回 None 时直接退出。
-    let Some(mut rx) = crate::clash::stream::traffic_rx() else {
-        return;
+    let mut rx = match crate::clash::stream::traffic_rx() {
+        Ok(rx) => rx,
+        Err(error) => {
+            crate::log::error(format_args!("启动流量统计失败：{error}"));
+            return;
+        }
     };
+    let mut core_state = crate::event::subscribe_core_state();
+    let initial_core_state = *core_state.borrow_and_update();
+    let shared_core_state: Arc<Mutex<CoreState>> = Arc::new(Mutex::new(initial_core_state));
 
     crate::runtime::spawn_task(async move {
+        let mut current_core_state = initial_core_state;
         let mut up = initial;
         let mut down = zero_samples();
 
         loop {
-            let traffic = match rx.recv().await {
-                Ok(traffic) => traffic,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    crate::log::error(format_args!("网速统计跳过 {skipped} 条过期消息"));
-                    continue;
+            tokio::select! {
+                biased;
+                result = core_state.changed() => {
+                    if result.is_err() {
+                        return;
+                    }
+                    let next = *core_state.borrow_and_update();
+                    if next == current_core_state {
+                        continue;
+                    }
+                    current_core_state = next;
+                    *shared_core_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+                    up = zero_samples();
+                    down = zero_samples();
+                    reset_speed_ui(&speed);
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            };
+                result = rx.recv() => {
+                    let traffic = match result {
+                        Ok(traffic) => traffic,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            crate::log::error(format_args!("网速统计跳过 {skipped} 条过期消息"));
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    };
 
-            // 纵向缩放峰值（两序列合并取最大值，至少为 1 避免除零）。
-            push_sample(&mut up, traffic.up as f32);
-            push_sample(&mut down, traffic.down as f32);
-            let peak = up
-                .iter()
-                .chain(down.iter())
-                .cloned()
-                .fold(0.0f32, f32::max)
-                .max(1.0);
+                    let latest_core_state = *core_state.borrow();
+                    if latest_core_state != current_core_state {
+                        current_core_state = latest_core_state;
+                        *shared_core_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = latest_core_state;
+                        up = zero_samples();
+                        down = zero_samples();
+                        reset_speed_ui(&speed);
+                    }
+                    if !accepts_traffic(current_core_state, &traffic) {
+                        continue;
+                    }
 
-            // 生成上传 / 下载的面积与描边路径命令串。
-            let (down_area, down_line) = build_paths(&down, peak);
-            let (up_area, up_line) = build_paths(&up, peak);
+                    // 纵向缩放峰值（两序列合并取最大值，至少为 1 避免除零）。
+                    let expected_generation = traffic.core_generation;
+                    let traffic = traffic.traffic;
+                    push_sample(&mut up, traffic.up as f32);
+                    push_sample(&mut down, traffic.down as f32);
+                    let peak = up
+                        .iter()
+                        .chain(down.iter())
+                        .cloned()
+                        .fold(0.0f32, f32::max)
+                        .max(1.0);
 
-            let up_rate = format_rate(traffic.up);
-            let down_rate = format_rate(traffic.down);
-            let up_total = format_total(traffic.up_total);
-            let down_total = format_total(traffic.down_total);
+                    // 生成上传 / 下载的面积与描边路径命令串。
+                    let (down_area, down_line) = build_paths(&down, peak);
+                    let (up_area, up_line) = build_paths(&up, peak);
 
-            // 克隆弱引用供事件循环闭包使用（外层 speed 仍需保留给后续循环）。
-            let weak = speed.clone();
-            if let Err(error) = slint::invoke_from_event_loop(move || {
-                if let Some(speed) = weak.upgrade() {
-                    speed.set_down_area_cmd(down_area.into());
-                    speed.set_down_line_cmd(down_line.into());
-                    speed.set_up_area_cmd(up_area.into());
-                    speed.set_up_line_cmd(up_line.into());
-                    speed.set_up_rate(up_rate.into());
-                    speed.set_down_rate(down_rate.into());
-                    speed.set_up_total(up_total.into());
-                    speed.set_down_total(down_total.into());
+                    let up_rate = format_rate(traffic.up);
+                    let down_rate = format_rate(traffic.down);
+                    let up_total = format_total(traffic.up_total);
+                    let down_total = format_total(traffic.down_total);
+
+                    // 克隆弱引用供事件循环闭包使用（外层 speed 仍需保留给后续循环）。
+                    let weak = speed.clone();
+                    let shared_core_state = shared_core_state.clone();
+                    if let Err(error) = slint::invoke_from_event_loop(move || {
+                        let state = shared_core_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if !state.running || state.generation != expected_generation {
+                            return;
+                        }
+                        drop(state);
+                        if let Some(speed) = weak.upgrade() {
+                            speed.set_down_area_cmd(down_area.into());
+                            speed.set_down_line_cmd(down_line.into());
+                            speed.set_up_area_cmd(up_area.into());
+                            speed.set_up_line_cmd(up_line.into());
+                            speed.set_up_rate(up_rate.into());
+                            speed.set_down_rate(down_rate.into());
+                            speed.set_up_total(up_total.into());
+                            speed.set_down_total(down_total.into());
+                        }
+                    }) {
+                        crate::log::error(format_args!("网速统计 UI 回调失败：{error}"));
+                        return;
+                    }
                 }
-            }) {
-                crate::log::error(format_args!("网速统计 UI 回调失败：{error}"));
-                return;
             }
         }
     });
+}
+
+fn reset_speed_ui(speed: &slint::Weak<SpeedModel<'static>>) {
+    let initial = zero_samples();
+    let (down_area, down_line) = build_paths(&initial, 1.0);
+    let (up_area, up_line) = build_paths(&initial, 1.0);
+    let weak = speed.clone();
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        if let Some(speed) = weak.upgrade() {
+            speed.set_down_area_cmd(down_area.into());
+            speed.set_down_line_cmd(down_line.into());
+            speed.set_up_area_cmd(up_area.into());
+            speed.set_up_line_cmd(up_line.into());
+            speed.set_up_rate("0 B/s".into());
+            speed.set_down_rate("0 B/s".into());
+            speed.set_up_total("0 B".into());
+            speed.set_down_total("0 B".into());
+        }
+    }) {
+        crate::log::error(format_args!("重置网速统计 UI 失败：{error}"));
+    }
+}
+
+fn accepts_traffic(state: CoreState, update: &TrafficUpdate) -> bool {
+    state.running && state.generation == update.core_generation
 }
 
 fn zero_samples() -> VecDeque<f32> {
@@ -332,5 +409,39 @@ mod tests {
     fn non_finite_samples_do_not_reach_path() {
         assert_safe_curve(&[f32::NAN, f32::INFINITY, -f32::INFINITY, -1.0]);
         assert_safe_curve(&[f32::MAX, 0.0, f32::MIN_POSITIVE]);
+    }
+
+    #[test]
+    fn traffic_from_old_core_generation_is_rejected() {
+        let update = TrafficUpdate {
+            core_generation: 1,
+            traffic: crate::clash::api::Traffic {
+                up: 1,
+                down: 2,
+                up_total: 3,
+                down_total: 4,
+            },
+        };
+        assert!(!accepts_traffic(
+            CoreState {
+                running: true,
+                generation: 2,
+            },
+            &update
+        ));
+        assert!(!accepts_traffic(
+            CoreState {
+                running: false,
+                generation: 1,
+            },
+            &update
+        ));
+        assert!(accepts_traffic(
+            CoreState {
+                running: true,
+                generation: 1,
+            },
+            &update
+        ));
     }
 }

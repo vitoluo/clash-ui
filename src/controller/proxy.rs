@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 
 use crate::clash::api::{self, ApiError, ProxyEntry};
-use crate::constants::{DEFAULT_TEST_URL, TEST_TIMEOUT_MS};
+use crate::consts::{DEFAULT_TEST_URL, TEST_TIMEOUT_MS};
+use crate::event::CoreState;
 use crate::{MainWindow, ProxyGroup, ProxyNode};
 
 const LATENCY_UNTESTED: i32 = 0;
@@ -40,9 +41,12 @@ pub struct ProxyViewState {
     groups: Vec<ProxyGroupState>,
     loading: bool,
     error: String,
+    core_state: CoreState,
     next_token: u64,
     refresh_token: u64,
     selection_token: u64,
+    loaded_generation: Option<u64>,
+    loading_generation: Option<u64>,
 }
 
 pub type SharedProxyState = Arc<Mutex<ProxyViewState>>;
@@ -51,6 +55,7 @@ pub(crate) fn bind_callbacks(window: &MainWindow, state: SharedProxyState) {
     window
         .global::<crate::ProxyModel>()
         .set_groups(ModelRc::new(VecModel::default()));
+    listen_core_state(window, state.clone());
     let weak = window.as_weak();
     window.global::<crate::ProxyModel>().on_toggle_group({
         let weak = weak.clone();
@@ -77,6 +82,39 @@ pub(crate) fn bind_callbacks(window: &MainWindow, state: SharedProxyState) {
     });
 }
 
+fn listen_core_state(window: &MainWindow, state: SharedProxyState) {
+    let weak = window.as_weak();
+    let mut core_state = crate::event::subscribe_core_state();
+    core_state.mark_changed();
+    crate::runtime::spawn_task(async move {
+        let mut previous_state = CoreState::default();
+        loop {
+            if core_state.changed().await.is_err() {
+                return;
+            }
+            let current_state = *core_state.borrow_and_update();
+            let should_clear =
+                !current_state.running || current_state.generation != previous_state.generation;
+            previous_state = current_state;
+            if should_clear {
+                clear_runtime(&state, current_state);
+                let weak = weak.clone();
+                let state = state.clone();
+                if let Err(error) = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = weak.upgrade() {
+                        sync_ui(&window, &state);
+                    }
+                }) {
+                    crate::log::error(format_args!("核心状态变化后清理代理页数据失败：{error}"));
+                }
+            }
+            if current_state.running {
+                refresh_async(weak.clone(), state.clone(), current_state);
+            }
+        }
+    });
+}
+
 fn lock_state(state: &SharedProxyState) -> MutexGuard<'_, ProxyViewState> {
     state
         .lock()
@@ -88,14 +126,17 @@ pub fn new_state() -> SharedProxyState {
 }
 
 /// 清空核心运行期间的代理数据，并使未完成请求失效。
-pub fn clear_runtime(state: &SharedProxyState) {
+pub fn clear_runtime(state: &SharedProxyState, core_state: CoreState) {
     let mut view = lock_state(state);
     view.groups.clear();
     view.loading = false;
     view.error.clear();
+    view.core_state = core_state;
     let token = next_token(&mut view);
     view.refresh_token = token;
     view.selection_token = token;
+    view.loaded_generation = None;
+    view.loading_generation = None;
 }
 
 fn next_token(state: &mut ProxyViewState) -> u64 {
@@ -373,12 +414,33 @@ where
     }
 }
 
-pub fn refresh_async(weak: Weak<MainWindow>, state: SharedProxyState) {
+pub fn refresh_async(weak: Weak<MainWindow>, state: SharedProxyState, core_state: CoreState) {
+    if !core_state.running {
+        if let Some(window) = weak.upgrade() {
+            let view = lock_state(&state);
+            set_ui_model(&window, &view);
+        }
+        return;
+    }
     let token = {
         let mut view = lock_state(&state);
+        if view.core_state != core_state {
+            view.core_state = core_state;
+            view.loaded_generation = None;
+            view.loading_generation = None;
+        }
+        if view.loaded_generation == Some(core_state.generation)
+            || view.loading_generation == Some(core_state.generation)
+        {
+            if let Some(window) = weak.upgrade() {
+                set_ui_state(&window, &view);
+            }
+            return;
+        }
         let token = next_token(&mut view);
         view.refresh_token = token;
         view.selection_token = token;
+        view.loading_generation = Some(core_state.generation);
         view.error.clear();
         view.set_loading(true);
         if let Some(window) = weak.upgrade() {
@@ -395,18 +457,24 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedProxyState) {
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
-            if view.refresh_token != token {
+            if view.refresh_token != token
+                || view.loading_generation != Some(core_state.generation)
+                || view.core_state != core_state
+                || *crate::event::subscribe_core_state().borrow() != core_state
+            {
                 return;
             }
             match result {
                 Ok(proxies) => {
                     view.merge_proxies(&proxies);
                     view.error.clear();
+                    view.loaded_generation = Some(core_state.generation);
                 }
                 Err(error) => {
                     view.error = format_error("加载代理数据失败", &error);
                 }
             }
+            view.loading_generation = None;
             view.set_loading(false);
             set_ui_model(&window, &view);
         });
@@ -428,8 +496,17 @@ pub fn select_node_async(
     group_index: i32,
     node_index: i32,
 ) {
-    let (group_name, node_name, token) = {
+    let (group_name, node_name, token, core_state) = {
+        let core_state = *crate::event::subscribe_core_state().borrow();
+        if !core_state.running {
+            return;
+        }
         let mut view = lock_state(&state);
+        if view.core_state != core_state {
+            view.core_state = core_state;
+            view.loaded_generation = None;
+            view.loading_generation = None;
+        }
         let Some(group) = view.groups.get(group_index.max(0) as usize) else {
             return;
         };
@@ -446,7 +523,8 @@ pub fn select_node_async(
         if let Some(window) = weak.upgrade() {
             set_ui_state(&window, &view);
         }
-        (group_name, node_name, token)
+        view.loading_generation = Some(core_state.generation);
+        (group_name, node_name, token, core_state)
     };
 
     crate::runtime::spawn_task(async move {
@@ -462,18 +540,24 @@ pub fn select_node_async(
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&state);
-            if view.selection_token != token {
+            if view.selection_token != token
+                || view.loading_generation != Some(core_state.generation)
+                || view.core_state != core_state
+                || *crate::event::subscribe_core_state().borrow() != core_state
+            {
                 return;
             }
             match result {
                 Ok(proxies) => {
                     view.merge_proxies(&proxies);
                     view.error.clear();
+                    view.loaded_generation = Some(core_state.generation);
                 }
                 Err(error) => {
                     view.error = format_error("选择代理节点失败", &error);
                 }
             }
+            view.loading_generation = None;
             view.set_loading(false);
             set_ui_model(&window, &view);
         });
@@ -481,7 +565,11 @@ pub fn select_node_async(
 }
 
 pub fn test_group_async(weak: Weak<MainWindow>, state: SharedProxyState, group_index: i32) {
-    let (group_name, test_url, token) = {
+    let (group_name, test_url, token, core_state) = {
+        let core_state = *crate::event::subscribe_core_state().borrow();
+        if !core_state.running {
+            return;
+        }
         let mut view = lock_state(&state);
         let index = group_index.max(0) as usize;
         let Some(group) = view.groups.get_mut(index) else {
@@ -507,7 +595,7 @@ pub fn test_group_async(weak: Weak<MainWindow>, state: SharedProxyState, group_i
         if let Some(window) = weak.upgrade() {
             update_group_row(&window, &view, index);
         }
-        (group_name, test_url, token)
+        (group_name, test_url, token, core_state)
     };
 
     crate::runtime::spawn_task(async move {
@@ -517,6 +605,9 @@ pub fn test_group_async(weak: Weak<MainWindow>, state: SharedProxyState, group_i
         }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
+            if *crate::event::subscribe_core_state().borrow() != core_state {
+                return;
+            }
             let mut view = lock_state(&state);
             let Some(group) = view
                 .groups
@@ -573,7 +664,11 @@ pub fn test_node_async(
     group_index: i32,
     node_index: i32,
 ) {
-    let (group_name, node_name, test_url, token) = {
+    let (group_name, node_name, test_url, token, core_state) = {
+        let core_state = *crate::event::subscribe_core_state().borrow();
+        if !core_state.running {
+            return;
+        }
         let mut view = lock_state(&state);
         let group_position = group_index.max(0) as usize;
         let node_position = node_index.max(0) as usize;
@@ -603,7 +698,7 @@ pub fn test_node_async(
         if let Some(window) = weak.upgrade() {
             update_node_row(&window, &view, group_position, node_position);
         }
-        (group_name, node_name, test_url, token)
+        (group_name, node_name, test_url, token, core_state)
     };
 
     crate::runtime::spawn_task(async move {
@@ -615,6 +710,9 @@ pub fn test_node_async(
         }
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
+            if *crate::event::subscribe_core_state().borrow() != core_state {
+                return;
+            }
             let mut view = lock_state(&state);
             let Some(group) = view
                 .groups
@@ -667,6 +765,7 @@ mod tests {
         ProxyNodeState, ProxyViewState, DEFAULT_TEST_URL, LATENCY_SUCCESS,
     };
     use crate::clash::api::ProxyEntry;
+    use crate::event::CoreState;
     use crate::{ProxyGroup, ProxyNode};
     use slint::{Model, ModelRc, VecModel};
     use std::collections::HashMap;
@@ -845,7 +944,13 @@ mod tests {
             (view.refresh_token, view.selection_token)
         };
 
-        clear_runtime(&state);
+        clear_runtime(
+            &state,
+            CoreState {
+                running: false,
+                generation: 2,
+            },
+        );
 
         let view = state.lock().unwrap();
         assert!(view.groups.is_empty());

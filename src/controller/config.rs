@@ -8,8 +8,8 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 
 use crate::app::config::{self, ConfigEntry, SourceType};
 use crate::clash::core;
-use crate::constants::{CONFIGS_DIR, RUNTIME_DIR};
-use crate::controller::{home, source};
+use crate::consts::{CONFIGS_DIR, RUNTIME_DIR};
+use crate::controller::common::source;
 use crate::{platform, ConfigRow, MainWindow};
 
 #[derive(Debug)]
@@ -18,6 +18,7 @@ pub struct ConfigViewState {
     loading: bool,
     busy: bool,
     error: String,
+    initialized: bool,
     next_token: u64,
     refresh_token: u64,
     operation_token: u64,
@@ -114,6 +115,7 @@ pub fn new_state(root: PathBuf) -> SharedConfigState {
         loading: false,
         busy: false,
         error: String::new(),
+        initialized: false,
         next_token: 0,
         refresh_token: 0,
         operation_token: 0,
@@ -201,6 +203,13 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedConfigState) {
     if view.busy {
         return;
     }
+    if view.initialized {
+        if let Some(window) = weak.upgrade() {
+            set_ui_state(&window, &view);
+        }
+        return;
+    }
+    view.initialized = true;
     view.refresh_token = next_token(&mut view);
     view.loading = false;
     view.error.clear();
@@ -260,8 +269,6 @@ fn finish_operation(
         } else {
             set_ui_state(&window, &view);
         }
-        home::refresh_runtime_state(&window);
-        home::refresh_static(window.as_weak());
         if !success && close_form {
             window.global::<crate::ConfigModel>().set_form_open(true);
         }
@@ -322,11 +329,13 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedConfigState) {
         return;
     };
     crate::runtime::spawn_blocking(move || {
-        let result = platform::pick_config_file().and_then(|path| match path {
-            Some(path) if path.is_file() => Ok(Some(path)),
-            Some(_) => Err("选择的路径不是文件".to_string()),
-            None => Ok(None),
-        });
+        let result = platform::pick_config_file()
+            .map_err(|error| error.to_string())
+            .and_then(|path| match path {
+                Some(path) if path.is_file() => Ok(Some(path)),
+                Some(_) => Err("选择的路径不是文件".to_string()),
+                None => Ok(None),
+            });
         if let Err(error) = &result {
             crate::log::error(format_args!("选择配置源文件失败：{error}"));
         }
@@ -681,7 +690,7 @@ fn delete_entry(root: &Path, path: &str) -> Result<(), String> {
         .ok_or_else(|| "未找到要删除的配置".to_string())?;
     let target = source::safe_internal_path(root, CONFIGS_DIR, &entry.path)?;
     if entry.enabled {
-        core::stop_core();
+        core::stop_core().map_err(|error| format!("停止核心失败：{error}"))?;
     }
     if target.exists() {
         fs::remove_file(&target).map_err(|error| format!("删除内部副本失败：{error}"))?;

@@ -100,16 +100,17 @@ fn enumerate_app_containers(api: &FirewallApi) -> Result<Vec<AppContainer>, Stri
             if count > 0 && containers.is_null() {
                 return Err("NetworkIsolationEnumAppContainers 返回空容器数组".to_string());
             }
-            let items = if containers.is_null() {
-                Vec::new()
+            let items_result: Result<Vec<AppContainer>, String> = if containers.is_null() {
+                Ok(Vec::new())
             } else {
                 unsafe {
                     // count 来自同一次成功的 Windows API 调用，指向连续结构数组。
                     slice::from_raw_parts(containers, count as usize)
                         .iter()
-                        .filter_map(|container| {
+                        .map(|container| {
                             let app_container_name =
-                                uwp_api::read_utf16(container.app_container_name)?;
+                                uwp_api::read_utf16(container.app_container_name)
+                                    .ok_or_else(|| "UWP 应用容器缺少有效名称".to_string())?;
                             let package_full_name =
                                 uwp_api::read_utf16(container.package_full_name)
                                     .unwrap_or_default();
@@ -120,7 +121,7 @@ fn enumerate_app_containers(api: &FirewallApi) -> Result<Vec<AppContainer>, Stri
                                 &package_full_name,
                             );
                             let sid = uwp_api::copy_sid(container.app_container_sid)?;
-                            Some(AppContainer {
+                            Ok(AppContainer {
                                 name,
                                 package_family_name,
                                 sid,
@@ -129,10 +130,28 @@ fn enumerate_app_containers(api: &FirewallApi) -> Result<Vec<AppContainer>, Stri
                         .collect()
                 }
             };
-            if !containers.is_null() {
+            let cleanup_result = if containers.is_null() {
+                Ok(())
+            } else {
                 // 释放枚举数组及其嵌套字段。
-                let _ = api.free_app_containers(containers);
-            }
+                let free_result = api.free_app_containers(containers);
+                if uwp_api::free_app_containers_succeeded(free_result) {
+                    Ok(())
+                } else {
+                    Err(uwp_api::format_network_isolation_error(
+                        "NetworkIsolationFreeAppContainers",
+                        free_result,
+                    ))
+                }
+            };
+            let items = match (items_result, cleanup_result) {
+                (Ok(items), Ok(())) => items,
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(_), Err(error)) => return Err(error),
+                (Err(error), Err(cleanup_error)) => {
+                    return Err(format!("{error}；同时释放 UWP 容器失败：{cleanup_error}"))
+                }
+            };
             let mut unique = Vec::with_capacity(items.len());
             for item in items {
                 if unique.iter().all(|current: &AppContainer| {
@@ -168,15 +187,15 @@ fn read_current_loopback_sids(api: &FirewallApi) -> Result<Vec<LoopbackSid>, Str
     if count > 0 && sids.is_null() {
         return Err("NetworkIsolationGetAppContainerConfig 返回空 SID 数组".to_string());
     }
-    let entries = if sids.is_null() {
-        Vec::new()
+    let entries_result: Result<Vec<LoopbackSid>, String> = if sids.is_null() {
+        Ok(Vec::new())
     } else {
         unsafe {
             // count 与 sids 由同一次成功调用返回，逐项复制后再释放原始缓冲区。
             slice::from_raw_parts(sids, count as usize)
                 .iter()
-                .filter_map(|entry| {
-                    Some(LoopbackSid {
+                .map(|entry| {
+                    Ok(LoopbackSid {
                         bytes: uwp_api::copy_sid(entry.sid)?,
                         attributes: entry.attributes,
                     })
@@ -184,11 +203,21 @@ fn read_current_loopback_sids(api: &FirewallApi) -> Result<Vec<LoopbackSid>, Str
                 .collect()
         }
     };
-    if !sids.is_null() {
-        unsafe {
-            uwp_api::free_loopback_sid_config(count, sids);
+    let cleanup_result = if sids.is_null() {
+        Ok(())
+    } else {
+        unsafe { uwp_api::free_loopback_sid_config(count, sids) }
+    };
+    let entries = match (entries_result, cleanup_result) {
+        (Ok(entries), Ok(())) => entries,
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(error)) => return Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            return Err(format!(
+                "{error}；同时释放 UWP SID 配置失败：{cleanup_error}"
+            ))
         }
-    }
+    };
     Ok(deduplicate_loopback_sids(entries))
 }
 
@@ -290,9 +319,19 @@ pub(super) fn set_uwp_loopback_batch_impl(changes: &[(String, bool)]) -> Result<
         return Ok(());
     }
     let api = FirewallApi::load()?;
-    let snapshot = load_uwp_snapshot(&api)?;
-    let next_sids = apply_uwp_changes(&snapshot.loopback_sids, &snapshot.containers, changes)?;
-    set_loopback_sid_config(&api, &next_sids)
+    let result = (|| {
+        let snapshot = load_uwp_snapshot(&api)?;
+        let next_sids = apply_uwp_changes(&snapshot.loopback_sids, &snapshot.containers, changes)?;
+        set_loopback_sid_config(&api, &next_sids)
+    })();
+    match (result, api.close()) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(format!("释放 UWP 网络隔离 API 失败：{error}")),
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{error}；同时释放 UWP 网络隔离 API 失败：{cleanup_error}"
+        )),
+    }
 }
 
 /// Windows 支持 UWP 回环代理设置。
@@ -301,29 +340,52 @@ pub fn supports_uwp() -> bool {
 }
 
 /// 枚举当前用户安装的 UWP 应用。
-pub fn list_uwp_apps() -> Result<Vec<crate::platform::UwpApp>, String> {
-    let api = FirewallApi::load()?;
-    let snapshot = load_uwp_snapshot(&api)?;
-    Ok(uwp_apps_from_containers(
-        snapshot.containers,
-        &snapshot.loopback_sids,
-    ))
+pub fn list_uwp_apps() -> Result<Vec<crate::platform::UwpApp>, crate::platform::PlatformError> {
+    let api = FirewallApi::load().map_err(|error| {
+        crate::platform::PlatformError::operation("加载 UWP 网络隔离 API 失败", error)
+    })?;
+    let result = load_uwp_snapshot(&api)
+        .map(|snapshot| uwp_apps_from_containers(snapshot.containers, &snapshot.loopback_sids));
+    let cleanup = api.close();
+    match (result, cleanup) {
+        (Ok(apps), Ok(())) => Ok(apps),
+        (Err(error), Ok(())) => Err(crate::platform::PlatformError::operation(
+            "读取 UWP 配置失败",
+            error,
+        )),
+        (Ok(_), Err(error)) => Err(crate::platform::PlatformError::operation(
+            "释放 UWP 网络隔离 API 失败",
+            error,
+        )),
+        (Err(error), Err(cleanup_error)) => Err(crate::platform::PlatformError::operation(
+            "读取 UWP 配置失败",
+            format!("{error}；同时释放 UWP 网络隔离 API 失败：{cleanup_error}"),
+        )),
+    }
 }
 
 /// 修改单个 UWP 应用的回环豁免状态。
 #[allow(dead_code)]
-pub fn set_uwp_loopback(package_family_name: &str, enabled: bool) -> Result<(), String> {
+pub fn set_uwp_loopback(
+    package_family_name: &str,
+    enabled: bool,
+) -> Result<(), crate::platform::PlatformError> {
     set_uwp_loopback_batch(&[(package_family_name.to_string(), enabled)])
 }
 
 /// 在一次提权流程中批量修改 UWP 应用的回环豁免状态。
-pub fn set_uwp_loopback_batch(changes: &[(String, bool)]) -> Result<(), String> {
+pub fn set_uwp_loopback_batch(
+    changes: &[(String, bool)],
+) -> Result<(), crate::platform::PlatformError> {
     if changes.is_empty() {
         return Ok(());
     }
     if crate::platform::is_admin() {
-        set_uwp_loopback_batch_impl(changes)
+        set_uwp_loopback_batch_impl(changes).map_err(|error| {
+            crate::platform::PlatformError::operation("修改 UWP 回环配置失败", error)
+        })
     } else {
         super::uwp_elevation::set_uwp_loopback_elevated(changes)
+            .map_err(|error| crate::platform::PlatformError::operation("请求 UWP 提权失败", error))
     }
 }

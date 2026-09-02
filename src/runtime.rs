@@ -3,17 +3,27 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::OnceLock;
 
 use futures_util::FutureExt;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Builder, Runtime};
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+// 共享运行时的异步工作线程数，覆盖应用的少量长期 I/O 任务。
+const RUNTIME_WORKER_THREADS: usize = 2;
+// 共享运行时的阻塞任务线程上限，避免桌面端长期保留过大的线程池。
+const RUNTIME_MAX_BLOCKING_THREADS: usize = 8;
 
 fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         install_abort_panic_hook();
-        Runtime::new().unwrap_or_else(|error| {
-            crate::log::error(format_args!("创建 Tokio 运行时失败：{error}"));
-            panic!("创建 Tokio 运行时失败：{error}");
-        })
+        Builder::new_multi_thread()
+            .worker_threads(RUNTIME_WORKER_THREADS)
+            .max_blocking_threads(RUNTIME_MAX_BLOCKING_THREADS)
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| {
+                crate::log::error(format_args!("创建 Tokio 运行时失败：{error}"));
+                panic!("创建 Tokio 运行时失败：{error}");
+            })
     })
 }
 
@@ -96,7 +106,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{block, spawn_blocking, spawn_task};
+    use super::{
+        block, spawn_blocking, spawn_task, RUNTIME_MAX_BLOCKING_THREADS, RUNTIME_WORKER_THREADS,
+    };
+
+    #[test]
+    fn shared_runtime_thread_limits_are_fixed() {
+        assert_eq!(RUNTIME_WORKER_THREADS, 2);
+        assert_eq!(RUNTIME_MAX_BLOCKING_THREADS, 8);
+        assert!(RUNTIME_WORKER_THREADS > 0);
+        assert!(RUNTIME_MAX_BLOCKING_THREADS >= RUNTIME_WORKER_THREADS);
+    }
 
     #[test]
     fn shared_blocking_pool_can_drive_sync_futures() {

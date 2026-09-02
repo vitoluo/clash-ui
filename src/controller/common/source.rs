@@ -210,7 +210,7 @@ fn resolve_directory(root: &Path, directory: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{CONFIGS_DIR, OVERRIDES_DIR};
+    use crate::consts::{CONFIGS_DIR, OVERRIDES_DIR};
     use std::fs;
 
     fn temp_root(name: &str) -> PathBuf {

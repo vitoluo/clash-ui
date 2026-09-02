@@ -72,9 +72,20 @@ pub(super) fn write_uwp_result(path: &Path, result: &Result<(), String>) -> Resu
     fs::rename(&temp_path, path).map_err(|error| format!("提交提权 UWP 结果失败：{error}"))
 }
 
-pub(super) fn cleanup_uwp_result(path: &Path) {
-    let _ = fs::remove_file(path);
-    let _ = fs::remove_file(uwp_result_temp_path(path));
+pub(super) fn cleanup_uwp_result(path: &Path) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for target in [path.to_path_buf(), uwp_result_temp_path(path)] {
+        if let Err(error) = fs::remove_file(&target) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                errors.push(format!("删除 {} 失败：{error}", target.display()));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("；"))
+    }
 }
 
 pub(super) fn wait_for_uwp_result(path: &Path) -> Result<(), String> {
@@ -136,8 +147,14 @@ pub(super) fn set_uwp_loopback_elevated(changes: &[(String, bool)]) -> Result<()
         }
         wait_for_uwp_result(&result_path)
     })();
-    cleanup_uwp_result(&result_path);
-    result
+    match (result, cleanup_uwp_result(&result_path)) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(format!("清理提权 UWP 结果失败：{error}")),
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{error}；同时清理提权 UWP 结果失败：{cleanup_error}"
+        )),
+    }
 }
 
 pub(super) fn elevated_uwp_launch_error(launch_code: Option<i32>) -> Option<String> {
@@ -150,7 +167,13 @@ pub(super) fn elevated_uwp_launch_error(launch_code: Option<i32>) -> Option<Stri
 }
 
 /// 由独立 UWP helper 读取参数、执行写入并提交业务结果。
-pub fn run_uwp_helper() -> Result<(), String> {
+pub fn run_uwp_helper() -> Result<(), crate::platform::PlatformError> {
+    run_uwp_helper_inner().map_err(|error| {
+        crate::platform::PlatformError::operation("执行提权 UWP helper 失败", error)
+    })
+}
+
+fn run_uwp_helper_inner() -> Result<(), String> {
     let mut args = std::env::args_os();
     let _ = args.next();
     let payload = args

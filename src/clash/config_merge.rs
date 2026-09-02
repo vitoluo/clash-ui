@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::app::config::{self, AppConfig, OverrideEntry};
-use crate::constants::{FIXED_YAML_PATH, RUNTIME_DIR};
+use crate::consts::{FIXED_YAML_PATH, RUNTIME_DIR};
 
 use super::core::CoreError;
 
@@ -29,21 +29,23 @@ fn is_instruction_key(key: &str) -> bool {
 }
 
 // 解析数组合并指令键。
-fn parse_instruction(key: &str) -> Option<(String, ArrayOp)> {
+fn parse_instruction(key: &str) -> Result<Option<(String, ArrayOp)>, CoreError> {
     if let Some(stripped) = key.strip_suffix("::^") {
-        return Some((stripped.to_string(), ArrayOp::Prepend));
+        return Ok(Some((stripped.to_string(), ArrayOp::Prepend)));
     }
     if let Some(stripped) = key.strip_suffix("::$") {
-        return Some((stripped.to_string(), ArrayOp::Append));
+        return Ok(Some((stripped.to_string(), ArrayOp::Append)));
     }
     if let Some(index) = key.rfind("::") {
         let number = &key[index + 2..];
         if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
-            let position = number.parse().unwrap_or(usize::MAX);
-            return Some((key[..index].to_string(), ArrayOp::Insert(position)));
+            let position = number.parse().map_err(|error| {
+                CoreError::Serialize(format!("数组合并索引无效 {number}：{error}"))
+            })?;
+            return Ok(Some((key[..index].to_string(), ArrayOp::Insert(position))));
         }
     }
-    None
+    Ok(None)
 }
 
 // 对目标数组应用前置、追加或插入操作。
@@ -74,14 +76,14 @@ fn apply_array_op(target: &mut Value, op: ArrayOp, other: Value) {
 }
 
 // 深度合并对象；数组默认整体覆盖，数组指令按键名执行。
-fn deep_merge(base: &mut Value, other: Value) {
+fn deep_merge(base: &mut Value, other: Value) -> Result<(), CoreError> {
     let Value::Object(other_map) = other else {
         *base = other;
-        return;
+        return Ok(());
     };
     let Value::Object(base_map) = base else {
         *base = Value::Object(other_map);
-        return;
+        return Ok(());
     };
 
     let mut instructions = Vec::new();
@@ -91,7 +93,7 @@ fn deep_merge(base: &mut Value, other: Value) {
             continue;
         }
         match base_map.get_mut(&key) {
-            Some(base_value) => deep_merge(base_value, value),
+            Some(base_value) => deep_merge(base_value, value)?,
             None => {
                 base_map.insert(key, value);
             }
@@ -99,7 +101,7 @@ fn deep_merge(base: &mut Value, other: Value) {
     }
 
     for (instruction_key, other_array) in instructions {
-        if let Some((target, op)) = parse_instruction(&instruction_key) {
+        if let Some((target, op)) = parse_instruction(&instruction_key)? {
             match base_map.get_mut(&target) {
                 Some(target_value) => apply_array_op(target_value, op, other_array),
                 None => {
@@ -110,20 +112,28 @@ fn deep_merge(base: &mut Value, other: Value) {
             }
         }
     }
+    Ok(())
 }
 
 /// 返回固定配置路径；数据根目录与资源根目录分离时，固定配置仍随执行文件保存。
-fn fixed_yaml_path(root: &Path) -> PathBuf {
+fn fixed_yaml_path(root: &Path) -> Result<PathBuf, CoreError> {
     let local_path = root.join(FIXED_YAML_PATH);
-    if local_path.exists() {
-        return local_path;
+    if local_path
+        .try_exists()
+        .map_err(|error| CoreError::Io("检查固定配置失败".into(), error))?
+    {
+        return Ok(local_path);
     }
 
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .map(|path| path.join(FIXED_YAML_PATH))
-        .unwrap_or(local_path)
+    let executable = std::env::current_exe()
+        .map_err(|error| CoreError::Io("获取当前程序路径失败".into(), error))?;
+    let executable_root = executable.parent().ok_or_else(|| {
+        CoreError::Io(
+            "获取当前程序目录失败".into(),
+            std::io::Error::new(std::io::ErrorKind::NotFound, "可执行文件没有父目录"),
+        )
+    })?;
+    Ok(executable_root.join(FIXED_YAML_PATH))
 }
 
 // 按配置、覆盖、clash 设置和固定配置的顺序生成运行时配置。
@@ -136,7 +146,7 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
         let value: Value = serde_saphyr::from_str(&content).map_err(|error| {
             CoreError::Parse(format!("解析配置 {} 失败", entry.path), Box::new(error))
         })?;
-        deep_merge(&mut merged, value);
+        deep_merge(&mut merged, value)?;
     }
 
     let mut overrides: Vec<&OverrideEntry> =
@@ -148,7 +158,7 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
         let value: Value = serde_saphyr::from_str(&content).map_err(|error| {
             CoreError::Parse(format!("解析覆盖 {} 失败", entry.path), Box::new(error))
         })?;
-        deep_merge(&mut merged, value);
+        deep_merge(&mut merged, value)?;
     }
 
     let mut clash_value = serde_json::to_value(&cfg.settings.clash).map_err(CoreError::Json)?;
@@ -161,13 +171,13 @@ fn merge_config_inner(root: &Path, cfg: &AppConfig) -> Result<(), CoreError> {
             tun_map.insert("enable".to_string(), Value::Bool(tun_enable));
         }
     }
-    deep_merge(&mut merged, clash_value);
+    deep_merge(&mut merged, clash_value)?;
 
-    let fixed_content = fs::read_to_string(fixed_yaml_path(root))
+    let fixed_content = fs::read_to_string(fixed_yaml_path(root)?)
         .map_err(|error| CoreError::Io("读取固定配置失败".into(), error))?;
     let fixed_value: Value = serde_saphyr::from_str(&fixed_content)
         .map_err(|error| CoreError::Parse("解析固定配置失败".into(), Box::new(error)))?;
-    deep_merge(&mut merged, fixed_value);
+    deep_merge(&mut merged, fixed_value)?;
 
     if let Value::Object(map) = &mut merged {
         // 合并完成后移除可选代理端口的 null 值，避免传给核心无效配置。
@@ -209,7 +219,7 @@ pub fn merge_config(root: &Path) -> Result<AppConfig, CoreError> {
 mod tests {
     use super::*;
     use crate::app::config::ConfigEntry;
-    use crate::constants::{ASSETS_DIR, CONFIGS_DIR, FIXED_YAML_PATH, OVERRIDES_DIR, RUNTIME_DIR};
+    use crate::consts::{ASSETS_DIR, CONFIGS_DIR, FIXED_YAML_PATH, OVERRIDES_DIR, RUNTIME_DIR};
     use std::fs;
     use std::path::PathBuf;
 
@@ -242,7 +252,7 @@ mod tests {
     fn deep_merge_overwrites_and_preserves_missing_keys() {
         let mut base: Value = serde_json::from_str(r#"{"a":1,"b":{"x":1,"y":2}}"#).unwrap();
         let other: Value = serde_json::from_str(r#"{"b":{"y":20,"z":3},"c":4}"#).unwrap();
-        deep_merge(&mut base, other);
+        deep_merge(&mut base, other).unwrap();
         assert_eq!(base["a"].as_i64(), Some(1));
         assert_eq!(base["b"]["y"].as_i64(), Some(20));
         assert_eq!(base["b"]["x"].as_i64(), Some(1));
@@ -253,39 +263,48 @@ mod tests {
     #[test]
     fn array_instructions_apply_without_leaking_instruction_keys() {
         let mut base = serde_json::json!({"list": ["a", "b"]});
-        deep_merge(&mut base, serde_json::json!({"list::^": ["z"]}));
+        deep_merge(&mut base, serde_json::json!({"list::^": ["z"]})).unwrap();
         assert_eq!(base["list"], serde_json::json!(["z", "a", "b"]));
         assert!(base.get("list::^").is_none());
 
         let mut base = serde_json::json!({"list": ["a", "b"]});
-        deep_merge(&mut base, serde_json::json!({"list::$": ["z"]}));
+        deep_merge(&mut base, serde_json::json!({"list::$": ["z"]})).unwrap();
         assert_eq!(base["list"], serde_json::json!(["a", "b", "z"]));
 
         let mut base = serde_json::json!({"list": ["a", "b", "c"]});
-        deep_merge(&mut base, serde_json::json!({"list::1": ["x"]}));
+        deep_merge(&mut base, serde_json::json!({"list::1": ["x"]})).unwrap();
         assert_eq!(base["list"], serde_json::json!(["a", "b", "x", "c"]));
 
         let mut base = serde_json::json!({"list": ["a", "b"]});
-        deep_merge(&mut base, serde_json::json!({"list::9": ["x"]}));
+        deep_merge(&mut base, serde_json::json!({"list::9": ["x"]})).unwrap();
         assert_eq!(base["list"], serde_json::json!(["a", "b", "x"]));
 
         let mut base = serde_json::json!({});
-        deep_merge(&mut base, serde_json::json!({"list::$": ["x"]}));
+        deep_merge(&mut base, serde_json::json!({"list::$": ["x"]})).unwrap();
         assert_eq!(base["list"], serde_json::json!(["x"]));
 
         let mut base = serde_json::json!({"list": ["a", "b"]});
         deep_merge(
             &mut base,
             serde_json::json!({format!("list::{}", usize::MAX): ["x", "y"]}),
-        );
+        )
+        .unwrap();
         assert_eq!(base["list"], serde_json::json!(["a", "b", "x", "y"]));
+    }
+
+    #[test]
+    fn array_instruction_index_overflow_returns_error() {
+        let mut base = serde_json::json!({"list": ["a"]});
+        let key = format!("list::{}0", usize::MAX);
+
+        assert!(deep_merge(&mut base, serde_json::json!({key: ["x"]})).is_err());
     }
 
     #[test]
     fn large_array_merge_preserves_order() {
         let mut base = serde_json::json!({"items": (0..5000).collect::<Vec<_>>()});
         let suffix = (5000..10000).collect::<Vec<_>>();
-        deep_merge(&mut base, serde_json::json!({"items::$": suffix}));
+        deep_merge(&mut base, serde_json::json!({"items::$": suffix})).unwrap();
         let items = base["items"].as_array().unwrap();
         assert_eq!(items.len(), 10000);
         assert_eq!(items.first().unwrap().as_i64(), Some(0));

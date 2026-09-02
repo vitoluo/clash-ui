@@ -5,11 +5,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::clash::api::{self, ConnEntry, ConnectionSnapshot};
 use crate::clash::stream::ConnectionUpdate;
-use crate::constants::MAX_CONNECTION_HISTORY;
+use crate::consts::MAX_CONNECTION_HISTORY;
+use crate::event::CoreState;
 use crate::{ConnectionDetailRow, ConnectionRow, ConnectionsModel, MainWindow};
 
 #[derive(Debug, Clone)]
@@ -221,19 +222,65 @@ pub fn clear_runtime(state: &SharedConnectionsState) {
     next_operation_token(&mut state);
 }
 
-pub fn start_recorder(mut receiver: mpsc::Receiver<ConnectionUpdate>) -> ConnectionsRecorder {
+fn sync_core_state(
+    current: &mut CoreState,
+    receiver: &mut watch::Receiver<CoreState>,
+    state: &SharedConnectionsState,
+) -> bool {
+    let next = *receiver.borrow_and_update();
+    if *current == next {
+        return false;
+    }
+    *current = next;
+    clear_runtime(state);
+    true
+}
+
+fn accepts_update(state: CoreState, update: &ConnectionUpdate) -> bool {
+    state.running && state.generation == update.core_generation
+}
+
+pub fn start_recorder(
+    mut receiver: mpsc::Receiver<ConnectionUpdate>,
+    mut core_state: watch::Receiver<CoreState>,
+) -> ConnectionsRecorder {
     let recorder = ConnectionsRecorder {
         state: new_state(),
         notifier: Arc::new(Mutex::new(None)),
     };
     let worker = recorder.clone();
     crate::runtime::spawn_task(async move {
-        while let Some(update) = receiver.recv().await {
-            if update.generation != crate::clash::stream::runtime_generation() {
-                continue;
+        let mut current_core_state = *core_state.borrow_and_update();
+        loop {
+            tokio::select! {
+                biased;
+                result = core_state.changed() => {
+                    if result.is_err() {
+                        return;
+                    }
+                    if sync_core_state(&mut current_core_state, &mut core_state, &worker.state) {
+                        worker.notify();
+                    }
+                }
+                update = receiver.recv() => {
+                    let Some(update) = update else {
+                        return;
+                    };
+                    let state_changed = sync_core_state(
+                        &mut current_core_state,
+                        &mut core_state,
+                        &worker.state,
+                    );
+                    if state_changed {
+                        worker.notify();
+                    }
+                    if !accepts_update(current_core_state, &update) {
+                        continue;
+                    }
+                    apply_snapshot(&worker.state, update.snapshot, Instant::now());
+                    worker.notify();
+                }
             }
-            apply_snapshot(&worker.state, update.snapshot, Instant::now());
-            worker.notify();
         }
     });
     recorder
@@ -582,7 +629,11 @@ fn next_operation_token(state: &mut ConnectionsViewState) -> u64 {
     state.operation_token
 }
 
-fn begin_operation(state: &SharedConnectionsState) -> Option<u64> {
+fn begin_operation(state: &SharedConnectionsState) -> Option<(u64, CoreState)> {
+    let core_state = *crate::event::subscribe_core_state().borrow();
+    if !core_state.running {
+        return None;
+    }
     let mut state = lock_state(state);
     if state.busy {
         return None;
@@ -590,7 +641,7 @@ fn begin_operation(state: &SharedConnectionsState) -> Option<u64> {
     let token = next_operation_token(&mut state);
     state.busy = true;
     state.error.clear();
-    Some(token)
+    Some((token, core_state))
 }
 
 fn set_toast(window: &MainWindow, message: &str, variant: i32) {
@@ -613,6 +664,7 @@ fn finish_operation(
     weak: Weak<MainWindow>,
     state: SharedConnectionsState,
     token: u64,
+    core_state: CoreState,
     result: Result<String, String>,
 ) {
     if let Err(message) = &result {
@@ -621,7 +673,9 @@ fn finish_operation(
     invoke_ui(move || {
         let (message, variant) = {
             let mut view = lock_state(&state);
-            if view.operation_token != token {
+            if view.operation_token != token
+                || *crate::event::subscribe_core_state().borrow() != core_state
+            {
                 return;
             }
             view.busy = false;
@@ -653,7 +707,7 @@ pub fn close_connection_async(
     if !lock_state(&state).active_by_id.contains_key(&identity) {
         return;
     }
-    let Some(token) = begin_operation(&state) else {
+    let Some((token, core_state)) = begin_operation(&state) else {
         return;
     };
     if let Some(window) = weak.upgrade() {
@@ -665,12 +719,12 @@ pub fn close_connection_async(
             .await
             .map(|_| "关闭连接请求已发送".to_string())
             .map_err(|error| format!("关闭连接失败：{error}"));
-        finish_operation(weak, worker_state, token, result);
+        finish_operation(weak, worker_state, token, core_state, result);
     });
 }
 
 pub fn close_all_async(weak: Weak<MainWindow>, state: SharedConnectionsState) {
-    let Some(token) = begin_operation(&state) else {
+    let Some((token, core_state)) = begin_operation(&state) else {
         return;
     };
     if let Some(window) = weak.upgrade() {
@@ -682,7 +736,7 @@ pub fn close_all_async(weak: Weak<MainWindow>, state: SharedConnectionsState) {
             .await
             .map(|_| "关闭全部连接请求已发送".to_string())
             .map_err(|error| format!("关闭全部连接失败：{error}"));
-        finish_operation(weak, worker_state, token, result);
+        finish_operation(weak, worker_state, token, core_state, result);
     });
 }
 
@@ -952,17 +1006,20 @@ mod tests {
     use super::{
         apply_snapshot, clear_history_local, clear_runtime, cycle_sort, detail_fields,
         format_bytes, format_rate, matches_query, new_state, project_rows, remove_history_local,
-        sync_rows_model, visible_connections, ConnectionRecord, ConnectionTab, SortColumn,
-        SortDirection, SortState,
+        start_recorder, sync_rows_model, visible_connections, ConnectionRecord, ConnectionTab,
+        SortColumn, SortDirection, SortState,
     };
     use crate::clash::api::{ConnEntry, ConnMeta, ConnectionSnapshot};
-    use crate::constants::MAX_CONNECTION_HISTORY;
+    use crate::clash::stream::ConnectionUpdate;
+    use crate::consts::MAX_CONNECTION_HISTORY;
+    use crate::event::CoreState;
     use crate::ConnectionRow;
     use serde_json::Value;
     use slint::{Model, ModelRc, SharedString, VecModel};
     use std::rc::Rc;
+    use std::thread;
     use std::time::{Duration, Instant};
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, mpsc};
 
     fn entry(id: &str, host: &str, upload: u64, download: u64) -> ConnEntry {
         ConnEntry {
@@ -1244,6 +1301,50 @@ mod tests {
         apply_snapshot(&state, latest, Instant::now());
         apply_snapshot(&state, snapshot(Vec::new()), Instant::now());
         assert_eq!(state.lock().unwrap().closed.len(), 1);
+    }
+
+    #[test]
+    fn recorder_discards_snapshot_from_old_core_generation() {
+        let (sender, receiver) = mpsc::channel(1);
+        let (core_sender, core_state) = tokio::sync::watch::channel(CoreState {
+            running: true,
+            generation: 1,
+        });
+        let recorder = start_recorder(receiver, core_state);
+        let state = recorder.state();
+
+        core_sender.send_replace(CoreState {
+            running: false,
+            generation: 2,
+        });
+        crate::runtime::block(sender.send(ConnectionUpdate {
+            core_generation: 1,
+            snapshot: snapshot(vec![entry("old", "old.example", 1, 1)]),
+        }))
+        .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(state.lock().unwrap().active_by_id.is_empty());
+
+        core_sender.send_replace(CoreState {
+            running: true,
+            generation: 3,
+        });
+        crate::runtime::block(sender.send(ConnectionUpdate {
+            core_generation: 3,
+            snapshot: snapshot(vec![entry("new", "new.example", 1, 1)]),
+        }))
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if state.lock().unwrap().active_by_id.contains_key("new") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let state = state.lock().unwrap();
+        assert_eq!(state.active_by_id.len(), 1);
+        assert!(state.active_by_id.contains_key("new"));
     }
 
     #[test]

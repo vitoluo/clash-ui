@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::{app_context::AppContext, config};
-use crate::constants::{
+use crate::consts::{
     ASSETS_DIR, CLASH_DIR, CONFIGS_DIR, FIXED_YAML, FIXED_YAML_PATH, GEO_DATA_FILES, OVERRIDES_DIR,
     RUNTIME_DIR, RUNTIME_UI_DIR,
 };
@@ -106,7 +106,7 @@ fn write_if_missing(path: &Path, content: &str) {
     }
 }
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> Result<(), anyhow::Error> {
     let resource_root = exe_dir();
     let data_root = data_root(&resource_root)?;
     log::init(&data_root);
@@ -119,14 +119,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let needs_elevation = config::get().proxy_status.tun && !platform::is_admin();
     if needs_elevation {
-        platform::request_elevation();
+        if let Err(error) = platform::request_elevation() {
+            log::error(format_args!("请求管理员权限失败：{error}"));
+        }
         return Ok(());
     }
 
     let context = AppContext::new(data_root, start)?;
     context.bind_callbacks();
     context.start_services();
-    context.show_and_run()
+    context.show_and_run().map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]

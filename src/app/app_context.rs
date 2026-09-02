@@ -6,8 +6,8 @@ use slint::{ComponentHandle, LogicalPosition, LogicalSize};
 use super::{app_bindings, config};
 use crate::clash::{core, stream};
 use crate::controller::{
-    config as config_page, connections, home, logs, proxy, r#override as override_page, rules,
-    settings, speed_stats, tray,
+    common::business, config as config_page, connections, home, logs, proxy,
+    r#override as override_page, rules, settings, speed_stats, tray,
 };
 use crate::{platform, ClashTray, MainWindow};
 
@@ -30,11 +30,11 @@ pub(crate) struct AppContext {
 }
 
 impl AppContext {
-    pub(crate) fn new(root: PathBuf, start: Instant) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn new(root: PathBuf, start: Instant) -> Result<Self, anyhow::Error> {
         let connections_recorder =
-            connections::start_recorder(stream::conns_rx().expect("连接广播发送端初始化失败"));
+            connections::start_recorder(stream::conns_rx()?, crate::event::subscribe_core_state());
         let logs_recorder =
-            logs::start_recorder(stream::logs_rx().expect("日志广播发送端初始化失败"));
+            logs::start_recorder(stream::logs_rx()?, crate::event::subscribe_core_state());
 
         let main_window = MainWindow::new()?;
         connections::attach_ui(&connections_recorder, main_window.as_weak());
@@ -68,19 +68,11 @@ impl AppContext {
         let connections_state = connections_recorder.state();
         let logs_state = logs_recorder.state();
         let settings_state = settings::new_state(root.clone());
-        settings::refresh(&main_window, &settings_state);
-        register_core_lifecycle_handlers(
-            &main_window,
-            start,
-            proxy_state.clone(),
-            rules_state.clone(),
-            connections_state.clone(),
-            logs_state.clone(),
-        );
+        register_system_proxy_lifecycle_listener();
         if let Err(error) = core::start_core(&root) {
             crate::log::error(format_args!("启动 clash 核心失败: {error}"));
         }
-        configure_theme(&main_window, &start);
+        configure_theme(&main_window);
 
         Ok(Self {
             root,
@@ -106,6 +98,7 @@ impl AppContext {
         logs::bind_callbacks(&self.main_window, self.logs_state.clone());
         connections::bind_callbacks(&self.main_window, self.connections_state.clone());
         proxy::bind_callbacks(&self.main_window, self.proxy_state.clone());
+        rules::listen_core_state(&self.main_window, self.rules_state.clone());
         config_page::bind_callbacks(&self.main_window, self.config_state.clone());
         override_page::bind_callbacks(&self.main_window, self.override_state.clone());
         home::bind_callbacks(
@@ -126,7 +119,7 @@ impl AppContext {
         );
     }
 
-    pub(crate) fn show_and_run(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn show_and_run(&self) -> Result<(), slint::PlatformError> {
         if !config::settings().app.silent_start {
             self.main_window.show()?;
         }
@@ -135,53 +128,48 @@ impl AppContext {
     }
 }
 
-fn register_core_lifecycle_handlers(
-    window: &MainWindow,
-    start: Instant,
-    proxy_state: proxy::SharedProxyState,
-    rules_state: rules::SharedRulesState,
-    connections_state: connections::SharedConnectionsState,
-    logs_state: logs::SharedLogsState,
-) {
-    core::set_ready_handler(tray::restore_system_proxy);
-    let weak = window.as_weak();
-    core::set_stop_handler(move || {
-        if config::get().proxy_status.system {
-            crate::runtime::spawn_blocking(|| {
-                if let Err(error) = tray::clear_system_proxy() {
-                    crate::log::error(format_args!("核心停止时清除系统代理失败：{error}"));
-                }
-            });
-        }
-        proxy::clear_runtime(&proxy_state);
-        rules::clear_runtime(&rules_state);
-        connections::clear_runtime(&connections_state);
-        logs::clear_runtime(&logs_state);
-
-        let weak = weak.clone();
-        let proxy_state = proxy_state.clone();
-        let rules_state = rules_state.clone();
-        let connections_state = connections_state.clone();
-        let logs_state = logs_state.clone();
-        if let Err(error) = slint::invoke_from_event_loop(move || {
-            let Some(window) = weak.upgrade() else {
+fn register_system_proxy_lifecycle_listener() {
+    let mut core_state = crate::event::subscribe_core_state();
+    crate::runtime::spawn_task(async move {
+        loop {
+            if core_state.changed().await.is_err() {
                 return;
-            };
-            proxy::sync_ui(&window, &proxy_state);
-            rules::sync_ui(&window, &rules_state);
-            connections::sync_ui(&window, &connections_state);
-            logs::sync_ui(&window, &logs_state);
-            home::refresh(&window, &start);
-        }) {
-            crate::log::error(format_args!("核心停止后清理页面数据失败：{error}"));
+            }
+            let state = *core_state.borrow_and_update();
+            if state.running {
+                business::restore_system_proxy(state);
+                continue;
+            }
+
+            if config::get().proxy_status.system {
+                match crate::runtime::spawn_blocking(business::clear_system_proxy).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        crate::log::error(format_args!("核心停止时清除系统代理失败：{error}"));
+                    }
+                    Err(error) => {
+                        crate::log::error(format_args!("核心停止时清除系统代理任务失败：{error}"));
+                    }
+                }
+            }
         }
     });
 }
 
 fn configure_window(main_window: &MainWindow) {
-    let (sw, sh) = platform::get_primary_screen_size();
-    let width = (sw / 2.0).max(900.0);
-    let height = (sh / 2.0).max(600.0);
+    let (sw, sh) = match platform::get_primary_screen_size() {
+        Ok(size) => size,
+        Err(error) => {
+            crate::log::error(format_args!("读取主显示器尺寸失败：{error}"));
+            (1800.0, 1200.0)
+        }
+    };
+    let (width, height) = (sw / 2.0, sh / 2.0);
+    let (width, height) = if width < 900.0 || height < 600.0 {
+        (900.0, 600.0)
+    } else {
+        (width, height)
+    };
     let window = main_window.window();
     window.set_size(LogicalSize::new(width, height));
     window.set_position(LogicalPosition::new(
@@ -190,7 +178,7 @@ fn configure_window(main_window: &MainWindow) {
     ));
 }
 
-fn configure_theme(main_window: &MainWindow, start: &Instant) {
+fn configure_theme(main_window: &MainWindow) {
     let theme_mode = config::get().settings.app.theme;
     main_window
         .global::<crate::Theme>()
@@ -198,7 +186,6 @@ fn configure_theme(main_window: &MainWindow, start: &Instant) {
     main_window
         .global::<crate::AppState>()
         .set_theme_mode(theme_index(theme_mode));
-    home::refresh(main_window, start);
 }
 
 fn theme_index(mode: config::ThemeMode) -> i32 {
@@ -211,7 +198,13 @@ fn theme_index(mode: config::ThemeMode) -> i32 {
 
 pub(crate) fn effective_dark(mode: config::ThemeMode) -> bool {
     match mode {
-        config::ThemeMode::System => platform::is_dark_mode(),
+        config::ThemeMode::System => match platform::is_dark_mode() {
+            Ok(is_dark) => is_dark,
+            Err(error) => {
+                crate::log::error(format_args!("检测系统主题失败：{error}"));
+                false
+            }
+        },
         config::ThemeMode::Light => false,
         config::ThemeMode::Dark => true,
     }

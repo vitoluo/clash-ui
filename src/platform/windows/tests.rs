@@ -3,7 +3,9 @@ use super::uwp::{
     apply_uwp_changes, resolve_uwp_display_name, resolve_uwp_display_name_with,
     set_uwp_loopback_batch, uwp_apps_from_containers, AppContainer, LoopbackSid,
 };
-use super::uwp_api::{format_network_isolation_error, ERROR_ACCESS_DENIED};
+use super::uwp_api::{
+    format_network_isolation_error, free_app_containers_succeeded, ERROR_ACCESS_DENIED,
+};
 use super::uwp_elevation::{
     cleanup_uwp_result, deserialize_uwp_changes, elevated_uwp_launch_error, new_uwp_result_path,
     parse_uwp_result, resolve_uwp_helper_path, serialize_uwp_changes, wait_for_uwp_result,
@@ -137,7 +139,7 @@ fn serializes_uwp_changes_and_uses_real_elevated_result() {
     let result_path = new_uwp_result_path().unwrap();
     write_uwp_result(&result_path, &Ok(())).unwrap();
     assert_eq!(wait_for_uwp_result(&result_path), Ok(()));
-    cleanup_uwp_result(&result_path);
+    cleanup_uwp_result(&result_path).expect("清理测试 UWP 结果失败");
 
     assert_eq!(
         resolve_uwp_helper_path(std::path::Path::new(r"C:\Clash\clash-ui.exe")).unwrap(),
@@ -206,6 +208,13 @@ fn formats_network_isolation_error_with_win32_code() {
     );
     assert!(error.contains("0x00000005"));
     assert!(error.contains("权限不足"));
+}
+
+#[test]
+fn accepts_boolean_success_from_free_app_containers() {
+    assert!(free_app_containers_succeeded(0));
+    assert!(free_app_containers_succeeded(1));
+    assert!(!free_app_containers_succeeded(87));
 }
 
 #[test]

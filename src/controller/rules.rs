@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 
 use crate::clash::api::{self, ApiError, RuleEntry};
-use crate::clash::stream;
+use crate::event::CoreState;
 use crate::{MainWindow, TableRow};
 
 #[derive(Debug, Default)]
@@ -13,9 +13,11 @@ pub struct RulesViewState {
     rules: Vec<RuleEntry>,
     loading: bool,
     error: String,
+    core_state: CoreState,
     next_token: u64,
     refresh_token: u64,
     loaded_generation: Option<u64>,
+    loading_generation: Option<u64>,
 }
 
 pub type SharedRulesState = Arc<Mutex<RulesViewState>>;
@@ -30,13 +32,48 @@ pub fn new_state() -> SharedRulesState {
     Arc::new(Mutex::new(RulesViewState::default()))
 }
 
+pub(crate) fn listen_core_state(window: &MainWindow, state: SharedRulesState) {
+    let weak = window.as_weak();
+    let mut core_state = crate::event::subscribe_core_state();
+    core_state.mark_changed();
+    crate::runtime::spawn_task(async move {
+        let mut previous_state = CoreState::default();
+        loop {
+            if core_state.changed().await.is_err() {
+                return;
+            }
+            let current_state = *core_state.borrow_and_update();
+            let should_clear =
+                !current_state.running || current_state.generation != previous_state.generation;
+            previous_state = current_state;
+            if should_clear {
+                clear_runtime(&state, current_state);
+                let weak = weak.clone();
+                let state = state.clone();
+                if let Err(error) = slint::invoke_from_event_loop(move || {
+                    if let Some(window) = weak.upgrade() {
+                        sync_ui(&window, &state);
+                    }
+                }) {
+                    crate::log::error(format_args!("核心状态变化后清理规则页数据失败：{error}"));
+                }
+            }
+            if current_state.running {
+                refresh_async(weak.clone(), state.clone(), current_state);
+            }
+        }
+    });
+}
+
 /// 清空核心运行期间的规则数据，并使未完成请求失效。
-pub fn clear_runtime(state: &SharedRulesState) {
+pub fn clear_runtime(state: &SharedRulesState, core_state: CoreState) {
     let mut view = lock_state(state);
     view.rules.clear();
     view.loading = false;
     view.error.clear();
+    view.core_state = core_state;
     view.loaded_generation = None;
+    view.loading_generation = None;
     view.refresh_token = next_token(&mut view);
 }
 
@@ -150,11 +187,24 @@ where
     }
 }
 
-pub fn refresh_async(weak: Weak<MainWindow>, state: SharedRulesState) {
-    let generation = stream::runtime_generation();
+pub fn refresh_async(weak: Weak<MainWindow>, state: SharedRulesState, core_state: CoreState) {
+    if !core_state.running {
+        if let Some(window) = weak.upgrade() {
+            let view = lock_state(&state);
+            set_ui_model(&window, &view);
+        }
+        return;
+    }
+    let generation = core_state.generation;
     let token = {
         let mut view = lock_state(&state);
-        if view.loaded_generation == Some(generation) {
+        if view.core_state != core_state {
+            view.core_state = core_state;
+            view.loaded_generation = None;
+            view.loading_generation = None;
+        }
+        if view.loaded_generation == Some(generation) || view.loading_generation == Some(generation)
+        {
             if let Some(window) = weak.upgrade() {
                 set_ui_state(&window, &view);
             }
@@ -164,6 +214,7 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedRulesState) {
         view.refresh_token = token;
         view.error.clear();
         view.loading = true;
+        view.loading_generation = Some(generation);
         if let Some(window) = weak.upgrade() {
             set_ui_state(&window, &view);
         }
@@ -179,7 +230,11 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedRulesState) {
         invoke_ui(move || {
             let Some(window) = weak.upgrade() else { return };
             let mut view = lock_state(&worker_state);
-            if view.refresh_token != token {
+            if view.refresh_token != token
+                || view.loading_generation != Some(generation)
+                || view.core_state != core_state
+                || *crate::event::subscribe_core_state().borrow() != core_state
+            {
                 return;
             }
             match result {
@@ -187,11 +242,13 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedRulesState) {
                     view.rules = rules;
                     view.error.clear();
                     view.loaded_generation = Some(generation);
+                    view.loading_generation = None;
                     view.loading = false;
                     set_ui_model(&window, &view);
                 }
                 Err(error) => {
                     view.error = format_error("加载规则数据失败", &error);
+                    view.loading_generation = None;
                     view.loading = false;
                     set_ui_state(&window, &view);
                 }
@@ -208,6 +265,7 @@ fn format_error(prefix: &str, error: &ApiError) -> String {
 mod tests {
     use super::{clear_runtime, new_state, sort_rules, sync_rules_model};
     use crate::clash::api::RuleEntry;
+    use crate::event::CoreState;
     use crate::TableRow;
     use slint::{Model, ModelRc, SharedString, VecModel};
     use std::rc::Rc;
@@ -259,7 +317,13 @@ mod tests {
             view.refresh_token
         };
 
-        clear_runtime(&state);
+        clear_runtime(
+            &state,
+            CoreState {
+                running: false,
+                generation: 2,
+            },
+        );
 
         let view = state.lock().unwrap();
         assert!(view.rules.is_empty());

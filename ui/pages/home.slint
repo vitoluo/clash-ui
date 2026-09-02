@@ -20,6 +20,9 @@ export global HomeModel {
     in-out property <string> core-mem: "—";
     in-out property <string> uptime: "0:00:00";
     in-out property <string> client-version: "—";
+    in-out property <bool> client-update-visible: false;
+    in-out property <string> client-update-tooltip: "";
+    in-out property <string> client-update-url: "";
     in-out property <string> zashboard-url: "";
     in-out property <bool> toast-visible: false;
     in-out property <string> toast-message: "";
@@ -32,6 +35,7 @@ export global HomeModel {
     callback restart-core();
     callback update-core();
     callback open-online-panel();
+    callback open-client-update();
 }
 
 component HomeCard inherits Card {
@@ -43,7 +47,10 @@ component HomeCard inherits Card {
     in property <bool> enabled: true;
     in property <bool> running: false;
     in property <bool> updating: false;
+    in property <bool> update-visible: false;
+    in property <string> update-tips: "";
     callback action(int);
+    callback update-action();
     property <length> link-height: 32px;
 
     card-radius: CardRadius.lg;
@@ -100,6 +107,19 @@ component HomeCard inherits Card {
                             stroke: Theme.ink;
                         }
                     }
+                }
+            }
+
+            if root.update-visible: Button {
+                size: ButtonSize.xs;
+                is-icon: true;
+                variant: ButtonVariant.ghost;
+                tips: root.update-tips;
+                clicked => { root.update-action(); }
+                IconDisplay {
+                    icon: IconSet.CircleAlert;
+                    size: Theme.typography-body-sm;
+                    stroke: Theme.semantic-danger;
                 }
             }
         }
@@ -272,6 +292,9 @@ export component HomePage inherits Rectangle {
                     height: grid.item-height;
                     label: "版本号";
                     value: HomeModel.client-version;
+                    update-visible: HomeModel.client-update-visible;
+                    update-tips: HomeModel.client-update-tooltip;
+                    update-action => { HomeModel.open-client-update(); }
                 }
 
                 HomeCard {

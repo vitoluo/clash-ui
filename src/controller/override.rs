@@ -7,8 +7,8 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 
 use crate::app::config::{self, OverrideEntry};
 use crate::clash::core;
-use crate::constants::OVERRIDES_DIR;
-use crate::controller::{home, source};
+use crate::consts::OVERRIDES_DIR;
+use crate::controller::common::source;
 use crate::{platform, MainWindow, OverrideModel, OverrideRow};
 
 #[derive(Debug)]
@@ -17,6 +17,7 @@ pub struct OverrideViewState {
     pub(crate) loading: bool,
     pub(crate) busy: bool,
     pub(crate) error: String,
+    pub(crate) initialized: bool,
     pub(crate) next_token: u64,
     pub(crate) refresh_token: u64,
     pub(crate) operation_token: u64,
@@ -107,6 +108,7 @@ pub fn new_state(root: PathBuf) -> SharedOverrideState {
         loading: false,
         busy: false,
         error: String::new(),
+        initialized: false,
         next_token: 0,
         refresh_token: 0,
         operation_token: 0,
@@ -285,8 +287,14 @@ pub fn refresh_async(weak: Weak<MainWindow>, state: SharedOverrideState) {
     if view.busy {
         return;
     }
-    let token = next_token(&mut view);
-    view.refresh_token = token;
+    if view.initialized {
+        if let Some(window) = weak.upgrade() {
+            set_ui_state(&window, &view);
+        }
+        return;
+    }
+    view.initialized = true;
+    view.refresh_token = next_token(&mut view);
     view.loading = false;
     view.error.clear();
     if let Some(window) = weak.upgrade() {
@@ -347,8 +355,6 @@ pub(crate) fn finish_operation(
         } else {
             set_ui_state(&window, &view);
         }
-        home::refresh_runtime_state(&window);
-        home::refresh_static(window.as_weak());
         if !success && close_form {
             window.global::<OverrideModel>().set_form_open(true);
         }
@@ -557,11 +563,13 @@ pub fn choose_file(weak: Weak<MainWindow>, state: SharedOverrideState) {
         return;
     };
     crate::runtime::spawn_blocking(move || {
-        let result = platform::pick_config_file().and_then(|path| match path {
-            Some(path) if path.is_file() => Ok(Some(path)),
-            Some(_) => Err("选择的路径不是文件".to_string()),
-            None => Ok(None),
-        });
+        let result = platform::pick_config_file()
+            .map_err(|error| error.to_string())
+            .and_then(|path| match path {
+                Some(path) if path.is_file() => Ok(Some(path)),
+                Some(_) => Err("选择的路径不是文件".to_string()),
+                None => Ok(None),
+            });
         if let Err(error) = &result {
             crate::log::error(format_args!("选择覆写源文件失败：{error}"));
         }

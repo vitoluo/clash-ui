@@ -9,7 +9,7 @@ use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{
+use crate::consts::{
     APP_CONFIG_PATH, DEFAULT_PROXY_BYPASS_LIST, DEFAULT_TUN_ROUTE_EXCLUDE_ADDRESS,
 };
 

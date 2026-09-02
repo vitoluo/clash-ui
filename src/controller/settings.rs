@@ -8,13 +8,13 @@ use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 
 use crate::app::config::{self, LogLevel, ThemeMode, TunStack};
 use crate::clash::core;
-use crate::controller::home;
 use crate::platform;
 use crate::{ListEntry, MainWindow, SettingsModel, UwpRow};
 
 #[derive(Debug)]
 pub struct SettingsViewState {
     root: PathBuf,
+    initialized: bool,
     core_dirty: bool,
     applying_core: bool,
     operation_busy: bool,
@@ -199,6 +199,7 @@ fn lock_state(state: &SharedSettingsState) -> MutexGuard<'_, SettingsViewState> 
 pub fn new_state(root: PathBuf) -> SharedSettingsState {
     Arc::new(Mutex::new(SettingsViewState {
         root,
+        initialized: false,
         core_dirty: false,
         applying_core: false,
         operation_busy: false,
@@ -357,6 +358,24 @@ fn render_list_editor(window: &MainWindow, state: &SettingsViewState) {
     model.set_dialog_list_draft(state.dialog_list_items.join("\n").into());
 }
 
+/// 释放对话框临时缓存，并使已关闭 UWP 对话框的异步结果失效。
+fn release_dialog_state(window: Option<&MainWindow>, state: &mut SettingsViewState) {
+    state.uwp_apps = Vec::new();
+    state.uwp_draft = Vec::new();
+    state.uwp_query = String::new();
+    state.dialog_list_items = Vec::new();
+    state.uwp_token = state.uwp_token.wrapping_add(1).max(1);
+
+    if let Some(window) = window {
+        let model = window.global::<SettingsModel>();
+        model.set_uwp_apps(ModelRc::new(VecModel::default()));
+        model.set_uwp_search("".into());
+        model.set_dialog_list_items(ModelRc::new(VecModel::default()));
+        model.set_dialog_list_draft("".into());
+        model.set_dialog_list_new_draft("".into());
+    }
+}
+
 fn set_model(window: &MainWindow, state: &SettingsViewState, cfg: &config::AppConfig) {
     let model = window.global::<SettingsModel>();
     let clash = &cfg.settings.clash;
@@ -385,19 +404,29 @@ fn set_model(window: &MainWindow, state: &SettingsViewState, cfg: &config::AppCo
     render_uwp(window, state);
 }
 
-/// 进入设置页时刷新展示值。
-pub fn refresh(window: &MainWindow, state: &SharedSettingsState) {
-    let cfg = config::get();
-    let should_load_uwp = platform::supports_uwp() && lock_state(state).uwp_apps.is_empty();
-    {
-        let mut view = lock_state(state);
-        if !view.operation_busy {
-            view.uwp_draft = enabled_uwp_packages(&view.uwp_apps);
-        }
-        set_model(window, &view, &cfg);
+fn begin_initialization(view: &mut SettingsViewState) -> bool {
+    if view.initialized {
+        return false;
     }
-    if should_load_uwp {
-        load_uwp_async(window.as_weak(), state.clone());
+    view.initialized = true;
+    view.uwp_draft = enabled_uwp_packages(&view.uwp_apps);
+    true
+}
+
+fn restore_model_from_config(window: &MainWindow, state: &SharedSettingsState) {
+    let cfg = config::get();
+    let view = lock_state(state);
+    set_model(window, &view, &cfg);
+}
+
+/// 首次进入设置页时初始化普通设置数据，后续进入沿用现有 UI 状态。
+pub fn refresh(window: &MainWindow, state: &SharedSettingsState) {
+    let should_initialize = {
+        let mut view = lock_state(state);
+        begin_initialization(&mut view)
+    };
+    if should_initialize {
+        restore_model_from_config(window, state);
     }
 }
 
@@ -506,7 +535,7 @@ pub fn submit_bind_address(weak: Weak<MainWindow>, state: SharedSettingsState, v
     if value.is_empty() {
         if let Some(window) = weak.upgrade() {
             set_toast(&window, "监听地址不能为空", 2);
-            refresh(&window, &state);
+            restore_model_from_config(&window, &state);
         }
         return;
     }
@@ -618,7 +647,7 @@ pub fn submit_tun_device(weak: Weak<MainWindow>, state: SharedSettingsState, val
     if value.is_empty() || value == "utun-" {
         if let Some(window) = weak.upgrade() {
             set_toast(&window, "网卡名称不能为空", 2);
-            refresh(&window, &state);
+            restore_model_from_config(&window, &state);
         }
         return;
     }
@@ -634,7 +663,7 @@ pub fn submit_tun_mtu(weak: Weak<MainWindow>, state: SharedSettingsState, value:
         _ => {
             if let Some(window) = weak.upgrade() {
                 set_toast(&window, "MTU 必须是正整数", 2);
-                refresh(&window, &state);
+                restore_model_from_config(&window, &state);
             }
             return;
         }
@@ -881,23 +910,29 @@ pub fn save_list(weak: Weak<MainWindow>, state: SharedSettingsState, kind: i32, 
             current.exclude_interface == values
         };
         if unchanged {
-            if let Some(window) = weak.upgrade() {
+            let window = weak.upgrade();
+            if let Some(window) = window.as_ref() {
                 sync_tun_list_summary(&window, kind);
                 window.global::<SettingsModel>().set_dialog_kind(0);
             }
+            let mut view = lock_state(&state);
+            release_dialog_state(window.as_ref(), &mut view);
             return;
         }
-        update_core(weak.clone(), state, move |clash| {
+        update_core(weak.clone(), state.clone(), move |clash| {
             if kind == 0 {
                 clash.tun.route_exclude_address = values.clone();
             } else {
                 clash.tun.exclude_interface = values.clone();
             }
         });
-        if let Some(window) = weak.upgrade() {
+        let window = weak.upgrade();
+        if let Some(window) = window.as_ref() {
             sync_tun_list_summary(&window, kind);
             window.global::<SettingsModel>().set_dialog_kind(0);
         }
+        let mut view = lock_state(&state);
+        release_dialog_state(window.as_ref(), &mut view);
         return;
     }
     if kind != 2 {
@@ -905,18 +940,25 @@ pub fn save_list(weak: Weak<MainWindow>, state: SharedSettingsState, kind: i32, 
     }
     let old = config::get().settings.proxy.bypass_list;
     if old == values {
-        if let Some(window) = weak.upgrade() {
+        let window = weak.upgrade();
+        if let Some(window) = window.as_ref() {
             window.global::<SettingsModel>().set_dialog_kind(0);
         }
+        let mut view = lock_state(&state);
+        release_dialog_state(window.as_ref(), &mut view);
         return;
     }
     config::update(|cfg| cfg.settings.proxy.bypass_list = values.clone());
-    if let Some(window) = weak.upgrade() {
+    let window = weak.upgrade();
+    if let Some(window) = window.as_ref() {
         window
             .global::<SettingsModel>()
             .set_bypass_list_summary(list_summary(&values).into());
         window.global::<SettingsModel>().set_dialog_kind(0);
     }
+    let mut view = lock_state(&state);
+    release_dialog_state(window.as_ref(), &mut view);
+    drop(view);
     let token = {
         let mut view = lock_state(&state);
         view.operation_busy = true;
@@ -959,8 +1001,7 @@ pub fn open_uwp(weak: Weak<MainWindow>, state: SharedSettingsState) {
     };
     {
         let mut view = lock_state(&state);
-        view.uwp_draft = enabled_uwp_packages(&view.uwp_apps);
-        render_uwp(&window, &view);
+        release_dialog_state(Some(&window), &mut view);
     }
     window.global::<SettingsModel>().set_dialog_kind(3);
     load_uwp_async(weak, state);
@@ -1058,7 +1099,7 @@ fn uwp_changes(current: &[String], desired: &[String]) -> Vec<(String, bool)> {
 }
 
 pub fn save_uwp(weak: Weak<MainWindow>, state: SharedSettingsState) {
-    let (current, desired, changes, token) = {
+    let (current, changes, token) = {
         let mut view = lock_state(&state);
         if view.operation_busy {
             return;
@@ -1067,14 +1108,17 @@ pub fn save_uwp(weak: Weak<MainWindow>, state: SharedSettingsState) {
         let desired = view.uwp_draft.clone();
         let changes = uwp_changes(&current, &desired);
         if changes.is_empty() {
-            if let Some(window) = weak.upgrade() {
+            let window = weak.upgrade();
+            if let Some(window) = window.as_ref() {
                 window.global::<SettingsModel>().set_dialog_kind(0);
             }
+            release_dialog_state(window.as_ref(), &mut view);
             return;
         }
         view.operation_busy = true;
         let token = next_token(&mut view);
-        (current, desired, changes, token)
+        view.uwp_token = token;
+        (current, changes, token)
     };
     if let Some(window) = weak.upgrade() {
         window.global::<SettingsModel>().set_operation_busy(true);
@@ -1096,8 +1140,8 @@ pub fn save_uwp(weak: Weak<MainWindow>, state: SharedSettingsState) {
             window.global::<SettingsModel>().set_operation_busy(false);
             match result {
                 Ok(()) => {
-                    view.uwp_draft = desired;
                     window.global::<SettingsModel>().set_dialog_kind(0);
+                    release_dialog_state(Some(&window), &mut view);
                     set_toast(&window, "UWP 回环设置已更新", 1);
                 }
                 Err(error) => {
@@ -1111,11 +1155,17 @@ pub fn save_uwp(weak: Weak<MainWindow>, state: SharedSettingsState) {
 }
 
 pub fn close_dialog(weak: Weak<MainWindow>, state: SharedSettingsState) {
-    if let Some(window) = weak.upgrade() {
-        let mut view = lock_state(&state);
-        view.uwp_draft = enabled_uwp_packages(&view.uwp_apps);
-        window.global::<SettingsModel>().set_dialog_kind(0);
+    let window = weak.upgrade();
+    let mut view = lock_state(&state);
+    if let Some(window) = window.as_ref() {
+        let model = window.global::<SettingsModel>();
+        if model.get_dialog_kind() == 3 && view.operation_busy {
+            view.operation_busy = false;
+            model.set_operation_busy(false);
+        }
+        model.set_dialog_kind(0);
     }
+    release_dialog_state(window.as_ref(), &mut view);
 }
 
 /// 点击浮动按钮后才合并配置并重启核心。
@@ -1154,7 +1204,6 @@ pub fn apply_core(weak: Weak<MainWindow>, state: SharedSettingsState) {
                     set_toast(&window, &format!("应用配置失败：{error}"), 2);
                 }
             }
-            home::refresh_runtime_state(&window);
         });
     });
 }
@@ -1263,6 +1312,15 @@ mod tests {
     }
 
     #[test]
+    fn settings_initialization_runs_only_once() {
+        let state = new_state(std::path::PathBuf::new());
+        let mut view = lock_state(&state);
+        assert!(begin_initialization(&mut view));
+        assert!(!begin_initialization(&mut view));
+        assert!(view.initialized);
+    }
+
+    #[test]
     fn derives_uwp_current_state_from_system_flags() {
         let apps = vec![
             platform::UwpApp {
@@ -1277,6 +1335,49 @@ mod tests {
             },
         ];
         assert_eq!(enabled_uwp_packages(&apps), vec!["enabled_abc".to_string()]);
+    }
+
+    #[test]
+    fn releases_dialog_state_and_invalidates_uwp_token() {
+        let state = new_state(std::path::PathBuf::new());
+        let mut view = lock_state(&state);
+        view.uwp_apps = vec![platform::UwpApp {
+            name: "应用".to_string(),
+            package_family_name: "app_abc".to_string(),
+            enabled: true,
+        }];
+        view.uwp_draft = vec!["app_abc".to_string()];
+        view.uwp_query = "应用".to_string();
+        view.dialog_list_items = vec!["10.0.0.0/8".to_string()];
+        view.uwp_token = 7;
+
+        release_dialog_state(None, &mut view);
+
+        assert!(view.uwp_apps.is_empty());
+        assert!(view.uwp_draft.is_empty());
+        assert!(view.uwp_query.is_empty());
+        assert!(view.dialog_list_items.is_empty());
+        assert_eq!(view.uwp_token, 8);
+    }
+
+    #[test]
+    fn closing_dialog_releases_state_without_window() {
+        let state = new_state(std::path::PathBuf::new());
+        {
+            let mut view = lock_state(&state);
+            view.uwp_apps = vec![platform::UwpApp {
+                name: "应用".to_string(),
+                package_family_name: "app_abc".to_string(),
+                enabled: false,
+            }];
+            view.dialog_list_items = vec!["接口".to_string()];
+        }
+
+        close_dialog(Weak::default(), state.clone());
+
+        let view = lock_state(&state);
+        assert!(view.uwp_apps.is_empty());
+        assert!(view.dialog_list_items.is_empty());
     }
 
     #[test]

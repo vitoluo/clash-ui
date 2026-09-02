@@ -7,6 +7,7 @@ use crate::controller::{
     config as config_page, connections, home, logs, proxy, r#override as override_page, rules,
     settings, tray,
 };
+use crate::platform;
 
 pub(crate) fn bind_app_state(context: &AppContext) {
     let weak = context.main_window.as_weak();
@@ -37,11 +38,28 @@ pub(crate) fn bind_app_state(context: &AppContext) {
     context
         .main_window
         .global::<crate::AppState>()
-        .on_confirm_tun_enable(tray::confirm_tun_enable);
+        .on_confirm_tun_enable(|| {
+            config::update(|c| c.proxy_status.tun = true);
+            if let Err(error) = platform::request_elevation() {
+                crate::log::error(format_args!("请求管理员权限失败：{error}"));
+            }
+            tray::quit();
+        });
     context
         .main_window
         .global::<crate::AppState>()
-        .on_cancel_tun_enable(tray::cancel_tun_enable);
+        .on_cancel_tun_enable({
+            let weak = weak.clone();
+            move || {
+                if let Some(window) = weak.upgrade() {
+                    window
+                        .global::<crate::AppState>()
+                        .set_tun_confirm_open(false);
+                }
+                config::update(|c| c.proxy_status.tun = false);
+                crate::event::publish_tun_proxy(false);
+            }
+        });
 
     context
         .main_window
@@ -56,15 +74,15 @@ pub(crate) fn bind_app_state(context: &AppContext) {
             let connections_state = context.connections_state.clone();
             let logs_state = context.logs_state.clone();
             let settings_state = context.settings_state.clone();
-            move |page| {
+            move |page: i32| {
                 let Some(window) = weak.upgrade() else {
                     return;
                 };
                 window.global::<crate::AppState>().set_current_page(page);
                 match page {
                     0 => home::refresh(&window, &start),
-                    1 => proxy::refresh_async(window.as_weak(), proxy_state.clone()),
-                    2 => rules::refresh_async(window.as_weak(), rules_state.clone()),
+                    1 => proxy::sync_ui(&window, &proxy_state),
+                    2 => rules::sync_ui(&window, &rules_state),
                     3 => config_page::refresh_async(window.as_weak(), config_state.clone()),
                     4 => override_page::refresh_async(window.as_weak(), override_state.clone()),
                     5 => connections::sync_ui(&window, &connections_state),

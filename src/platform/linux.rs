@@ -6,11 +6,11 @@ use std::process::Child;
 pub struct CoreProcessGuard;
 
 impl CoreProcessGuard {
-    pub fn attach(_child: &Child) -> Result<Self, String> {
+    pub fn attach(_child: &Child) -> Result<Self, crate::platform::PlatformError> {
         Ok(Self)
     }
 
-    pub fn terminate(&self) -> Result<(), String> {
+    pub fn terminate(&self) -> Result<(), crate::platform::PlatformError> {
         Ok(())
     }
 }
@@ -34,16 +34,27 @@ pub fn supports_uwp() -> bool {
     false
 }
 
-pub fn list_uwp_apps() -> Result<Vec<crate::platform::UwpApp>, String> {
-    Err("当前平台不支持 UWP 设置".to_string())
+pub fn list_uwp_apps() -> Result<Vec<crate::platform::UwpApp>, crate::platform::PlatformError> {
+    Err(crate::platform::PlatformError::unsupported(
+        "当前平台不支持 UWP 设置",
+    ))
 }
 
-pub fn set_uwp_loopback(_package_family_name: &str, _enabled: bool) -> Result<(), String> {
-    Err("当前平台不支持 UWP 设置".to_string())
+pub fn set_uwp_loopback(
+    _package_family_name: &str,
+    _enabled: bool,
+) -> Result<(), crate::platform::PlatformError> {
+    Err(crate::platform::PlatformError::unsupported(
+        "当前平台不支持 UWP 设置",
+    ))
 }
 
-pub fn set_uwp_loopback_batch(_changes: &[(String, bool)]) -> Result<(), String> {
-    Err("当前平台不支持 UWP 设置".to_string())
+pub fn set_uwp_loopback_batch(
+    _changes: &[(String, bool)],
+) -> Result<(), crate::platform::PlatformError> {
+    Err(crate::platform::PlatformError::unsupported(
+        "当前平台不支持 UWP 设置",
+    ))
 }
 
 #[cfg(test)]

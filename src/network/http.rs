@@ -3,19 +3,23 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
-fn client() -> &'static reqwest::Client {
-    CLIENT.get_or_init(|| {
+fn client() -> Result<&'static reqwest::Client, Error> {
+    match CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
             .build()
-            .expect("创建 HTTP 客户端失败")
-    })
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(client) => Ok(client),
+        Err(error) => Err(Error::Client(error.clone())),
+    }
 }
 
 #[derive(Debug)]
 pub enum Error {
+    Client(String),
     Request(reqwest::Error),
     Status(u16, String),
 }
@@ -23,6 +27,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Client(error) => write!(formatter, "创建 HTTP 客户端失败: {error}"),
             Self::Request(error) => write!(formatter, "HTTP 请求失败: {error}"),
             Self::Status(code, message) => write!(formatter, "HTTP 状态码 {code}: {message}"),
         }
@@ -47,7 +52,7 @@ pub async fn get_json<T: DeserializeOwned>(
     query: Option<&[(&str, &str)]>,
     timeout: Duration,
 ) -> Result<T, Error> {
-    let mut builder = authorize(client().get(url).timeout(timeout), authorization);
+    let mut builder = authorize(client()?.get(url).timeout(timeout), authorization);
     if let Some(query) = query {
         builder = builder.query(query);
     }
@@ -68,7 +73,7 @@ pub async fn request_status(
     timeout: Duration,
 ) -> Result<(), Error> {
     let mut builder = authorize(
-        client().request(method, url).timeout(timeout),
+        client()?.request(method, url).timeout(timeout),
         authorization,
     );
     if let Some(query) = query {
@@ -87,7 +92,7 @@ pub async fn request_status(
 
 /// 下载文本，并由调用方指定总超时。
 pub async fn download_text(url: &str, timeout: Duration) -> Result<String, Error> {
-    let response = client()
+    let response = client()?
         .get(url)
         .timeout(timeout)
         .send()

@@ -8,6 +8,7 @@ pub(super) const ERROR_SUCCESS: u32 = 0;
 pub(super) const ERROR_ACCESS_DENIED: u32 = 5;
 pub(super) const HRESULT_ACCESS_DENIED: u32 = 0x8007_0005;
 pub(super) const NETISO_FLAG_FORCE_COMPUTE_BINARIES: u32 = 1;
+const FREE_APP_CONTAINERS_BOOL_SUCCESS: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -131,13 +132,15 @@ impl FirewallApi {
             })
         })();
 
-        if result.is_err() {
-            unsafe {
-                // 导出函数加载失败时立即释放已加载的 DLL，避免泄漏模块句柄。
-                let _ = FreeLibrary(module);
-            }
+        match result {
+            Ok(api) => Ok(api),
+            Err(error) => match unsafe { free_library(module) } {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "{error}；同时释放 FirewallAPI.dll 失败：{cleanup_error}"
+                )),
+            },
         }
-        result
     }
 
     pub(super) fn enum_app_containers(
@@ -180,16 +183,25 @@ impl FirewallApi {
             (self.set_app_container_config_fn)(count, sids)
         }
     }
+
+    pub(super) fn close(mut self) -> Result<(), String> {
+        if self.module.is_null() {
+            return Ok(());
+        }
+        let module = self.module;
+        self.module = ptr::null_mut();
+        unsafe { free_library(module) }
+    }
 }
 
 impl Drop for FirewallApi {
     fn drop(&mut self) {
         if !self.module.is_null() {
-            unsafe {
-                // 所有通过该模块取得的函数指针已不再使用，再释放 DLL 句柄。
-                let _ = FreeLibrary(self.module);
-            }
+            let module = self.module;
             self.module = ptr::null_mut();
+            if let Err(error) = unsafe { free_library(module) } {
+                crate::log::error(format_args!("释放 FirewallAPI.dll 失败：{error}"));
+            }
         }
     }
 }
@@ -216,6 +228,11 @@ pub(super) fn format_network_isolation_error(api_name: &str, code: u32) -> Strin
 
 pub(super) fn is_access_denied(code: u32) -> bool {
     matches!(code, ERROR_ACCESS_DENIED | HRESULT_ACCESS_DENIED)
+}
+
+pub(super) fn free_app_containers_succeeded(code: u32) -> bool {
+    // 部分 Windows 版本按 BOOL 实现该函数，释放成功返回 TRUE(1)，而不是 ERROR_SUCCESS(0)。
+    matches!(code, ERROR_SUCCESS | FREE_APP_CONTAINERS_BOOL_SUCCESS)
 }
 
 pub(super) fn read_utf16(value: *const u16) -> Option<String> {
@@ -285,44 +302,68 @@ pub(super) fn load_indirect_string(value: &str) -> Option<String> {
         };
         (result >= 0).then(|| read_utf16_buffer(&output)).flatten()
     })();
-    unsafe {
-        // 资源字符串解析完成后释放临时模块句柄。
-        let _ = FreeLibrary(module);
+    if let Err(error) = unsafe { free_library(module) } {
+        crate::log::error(format_args!("释放 Shlwapi.dll 失败：{error}"));
     }
     result
 }
 
-pub(super) fn copy_sid(value: *const c_void) -> Option<Vec<u8>> {
+pub(super) fn copy_sid(value: *const c_void) -> Result<Vec<u8>, String> {
     if value.is_null() {
-        return None;
+        return Err("UWP SID 指针为空".to_string());
     }
     let (valid, length) = unsafe {
         // SID 指针由 Windows API 返回；先校验，再按 API 给出的长度复制。
         (IsValidSid(value), GetLengthSid(value))
     };
     if valid == 0 || length < 8 {
-        return None;
+        return Err("UWP SID 无效".to_string());
     }
-    Some(unsafe {
+    Ok(unsafe {
         // IsValidSid 已确认缓冲区长度；复制后不再持有外部 SID 指针。
         slice::from_raw_parts(value as *const u8, length as usize).to_vec()
     })
 }
 
-pub(super) unsafe fn free_loopback_sid_config(count: u32, sids: *mut SidAndAttributes) {
+pub(super) unsafe fn free_loopback_sid_config(
+    count: u32,
+    sids: *mut SidAndAttributes,
+) -> Result<(), String> {
     if sids.is_null() {
-        return;
+        return Ok(());
     }
     // GetAppContainerConfig 的官方示例要求使用进程堆释放每个 SID 和外层数组。
     let heap = GetProcessHeap();
     if heap.is_null() {
-        return;
+        return Err("获取进程堆失败".to_string());
     }
+    let mut errors = Vec::new();
     let items = slice::from_raw_parts_mut(sids, count as usize);
     for item in items {
-        if !item.sid.is_null() {
-            let _ = HeapFree(heap, 0, item.sid);
+        if !item.sid.is_null() && HeapFree(heap, 0, item.sid) == 0 {
+            errors.push(format!(
+                "释放 UWP SID 失败：{}",
+                std::io::Error::last_os_error()
+            ));
         }
     }
-    let _ = HeapFree(heap, 0, sids as *mut c_void);
+    if HeapFree(heap, 0, sids as *mut c_void) == 0 {
+        errors.push(format!(
+            "释放 UWP SID 数组失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("；"))
+    }
+}
+
+unsafe fn free_library(module: *mut c_void) -> Result<(), String> {
+    if FreeLibrary(module) == 0 {
+        Err(std::io::Error::last_os_error().to_string())
+    } else {
+        Ok(())
+    }
 }
