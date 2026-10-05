@@ -9,6 +9,7 @@ fn client() -> Result<&'static reqwest::Client, Error> {
     match CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
+            .user_agent("clash.meta")
             .build()
             .map_err(|error| error.to_string())
     }) {

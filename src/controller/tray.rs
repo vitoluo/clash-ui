@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use slint::ComponentHandle;
+use slint::winit_030::WinitWindowAccessor;
 
 use crate::app::config;
 use crate::clash::{api, core};
@@ -208,7 +209,12 @@ pub fn show_main() {
         WINDOW.with(|w| {
             if let Some(weak) = w.borrow().as_ref() {
                 if let Some(win) = weak.upgrade() {
-                    let _ = win.show();
+                    if let Err(error) = win.show() {
+                        crate::log::error(format_args!("显示主界面失败：{error}"));
+                    }
+                    win.window().with_winit_window(|winit_window| {
+                        winit_window.focus_window();
+                    });
                 }
             }
         });
