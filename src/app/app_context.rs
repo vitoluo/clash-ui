@@ -40,7 +40,7 @@ impl AppContext {
         connections::attach_ui(&connections_recorder, main_window.as_weak());
         logs::attach_ui(&logs_recorder, main_window.as_weak());
         configure_window(&main_window);
-        // Slint 1.17.1 的 live-preview 解释器无法正确显示 SystemTrayIcon。
+        // live-preview 解释器无法正确显示 SystemTrayIcon。
         let tray = if std::env::var_os("SLINT_LIVE_PREVIEW").is_some() {
             None
         } else {

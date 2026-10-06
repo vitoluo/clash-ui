@@ -6,7 +6,7 @@
 //
 // 组件与全局定义见 ui/speed-stats.slint；导航区底部最终布局由 task 007 接管。
 //
-// 注意：本版本 Slint 1.17.1 无内置 Canvas 元素，故改用 Path + viewbox 方案
+// 注意：当前 Slint API 无内置 Canvas 元素，故改用 Path + viewbox 方案
 //       （与 plan.md 中「Canvas 不可用时退路为 Path」一致，且响应式更稳）。
 
 use std::collections::VecDeque;

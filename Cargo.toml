@@ -1,6 +1,6 @@
 [package]
 name = "clash-ui"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 default-run = "clash-ui"
 
@@ -11,7 +11,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "q
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "1"
 serde_json = "1"
-slint = { version = "1", features = ["unstable-winit-030", "system-tray"] }
+slint = { version = "1.18.1", features = ["unstable-winit-030", "system-tray"] }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
@@ -33,7 +33,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [build-dependencies]
 lucide-slint = "1"
-slint-build = "1"
+slint-build = "1.18.1"
 
 [profile.dev]
 debug = "line-tables-only"

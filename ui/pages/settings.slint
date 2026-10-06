@@ -178,8 +178,8 @@ export component SettingsPage inherits Rectangle {
                 property <length> has-save-btn-height: Theme.button-lg + Theme.spacing-md + body-content.preferred-height;
 
                 height: parent.height;
-                viewport-width: self.width;
-                viewport-height: SettingsModel.core-dirty && has-save-btn-height > parent.height
+                content-width: self.width;
+                content-height: SettingsModel.core-dirty && has-save-btn-height > parent.height
                     ? has-save-btn-height
                     : body-content.preferred-height;
 
@@ -489,7 +489,7 @@ export component SettingsPage inherits Rectangle {
             (SettingsModel.dialog-list-kind == 1 ? "排除接口" : "跳过代理");
         dismissed => { SettingsModel.close-dialog(); }
         changed open => {
-            content-list.viewport-y = 0;
+            content-list.content-y = 0;
         }
 
         VerticalLayout {
@@ -500,9 +500,9 @@ export component SettingsPage inherits Rectangle {
                 font-size: Theme.typography-body-sm;
             }
             content-list := ListView {
-                property <length> content-height: SettingsModel.dialog-list-items.length * Theme.button-md
+                property <length> items-height: SettingsModel.dialog-list-items.length * Theme.button-md
                     + (SettingsModel.dialog-list-items.length - 1) * Theme.spacing-sm;
-                height: content-height < 320px ? content-height : 320px;
+                height: self.items-height < 320px ? self.items-height : 320px;
                 for item[index] in SettingsModel.dialog-list-items: VerticalLayout {
                     ListEditorRow {
                         value: item.value;
@@ -573,9 +573,9 @@ export component SettingsPage inherits Rectangle {
                 edited(value) => { SettingsModel.search-uwp(value); }
             }
             uwp-list := ListView {
-                property <length> content-height: SettingsModel.uwp-apps.length * Theme.button-md
+                property <length> items-height: SettingsModel.uwp-apps.length * Theme.button-md
                     + (SettingsModel.uwp-apps.length - 1) * Theme.spacing-sm;
-                height: content-height < 240px ? content-height : 240px;
+                height: self.items-height < 240px ? self.items-height : 240px;
                 for app[idx] in SettingsModel.uwp-apps: VerticalLayout {
                     spacing: Theme.spacing-sm;
                     FormRow {

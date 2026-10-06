@@ -327,7 +327,7 @@ export component ConfigPage inherits Rectangle {
 
         ScrollView {
             height: 360px;
-            viewport-height: runtime-text.preferred-height;
+            content-height: runtime-text.preferred-height;
             runtime-text := TextInput {
                 text: ConfigModel.runtime-config;
                 color: Theme.ink;
